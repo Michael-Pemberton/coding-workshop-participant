@@ -1,0 +1,169 @@
+"""Shared utilities for all Lambda handlers — imported by each service at runtime."""
+
+import json
+import logging
+import os
+import re
+from datetime import date
+
+import psycopg
+import jwt
+
+logger = logging.getLogger(__name__)
+
+IS_LOCAL = os.getenv("IS_LOCAL", "false") == "true"
+JWT_SECRET = os.getenv("JWT_SECRET", "dev-secret-key-change-in-production")
+
+_conn = None
+
+DDL = """
+CREATE EXTENSION IF NOT EXISTS "pgcrypto";
+CREATE TABLE IF NOT EXISTS users (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), email VARCHAR(255) UNIQUE NOT NULL, name VARCHAR(255) NOT NULL, picture TEXT, user_role VARCHAR(50) NOT NULL DEFAULT 'viewer', is_active BOOLEAN DEFAULT TRUE, username VARCHAR(100) UNIQUE, password_hash TEXT, created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(), updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW());
+ALTER TABLE users ADD COLUMN IF NOT EXISTS username VARCHAR(100) UNIQUE;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS password_hash TEXT;
+CREATE TABLE IF NOT EXISTS projects (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), title VARCHAR(255) NOT NULL, description TEXT, status VARCHAR(50) NOT NULL DEFAULT 'active', health VARCHAR(50) NOT NULL DEFAULT 'green', start_date DATE, end_date DATE, budget_planned DECIMAL(15,2) DEFAULT 0.00, budget_consumed DECIMAL(15,2) DEFAULT 0.00, dependency_ids UUID[] DEFAULT '{}', is_deleted BOOLEAN DEFAULT FALSE, created_by UUID, created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(), updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW());
+CREATE TABLE IF NOT EXISTS people (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), name VARCHAR(255) NOT NULL, email VARCHAR(255) UNIQUE NOT NULL, title VARCHAR(100), weekly_hours_capacity INTEGER DEFAULT 40, is_active BOOLEAN DEFAULT TRUE, is_deleted BOOLEAN DEFAULT FALSE, created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(), updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW());
+CREATE TABLE IF NOT EXISTS assignments (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), person_id UUID NOT NULL, project_id UUID NOT NULL, role_on_project VARCHAR(100), hours_per_week INTEGER DEFAULT 0, start_date DATE, end_date DATE, is_deleted BOOLEAN DEFAULT FALSE, created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(), updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW());
+CREATE TABLE IF NOT EXISTS deliverables (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), project_id UUID NOT NULL, title VARCHAR(255) NOT NULL, description TEXT, status VARCHAR(50) NOT NULL DEFAULT 'pending', due_date DATE, depends_on_id UUID, is_deleted BOOLEAN DEFAULT FALSE, created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(), updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW());
+CREATE TABLE IF NOT EXISTS budget_items (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), project_id UUID NOT NULL, category VARCHAR(100) NOT NULL DEFAULT 'other', description TEXT, amount_planned DECIMAL(15,2) DEFAULT 0.00, amount_consumed DECIMAL(15,2) DEFAULT 0.00, is_deleted BOOLEAN DEFAULT FALSE, created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(), updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW());
+"""
+
+
+def get_db():
+    """Returns a reused PostgreSQL connection, reconnecting if closed."""
+    global _conn
+    if _conn is None or _conn.closed:
+        dsn = (
+            f"host={os.getenv('POSTGRES_HOST', 'localhost')} "
+            f"port={os.getenv('POSTGRES_PORT', '5432')} "
+            f"dbname={os.getenv('POSTGRES_NAME', 'postgres')} "
+            f"user={os.getenv('POSTGRES_USER', 'postgres')} "
+            f"password={os.getenv('POSTGRES_PASS', 'postgres123')} "
+            f"connect_timeout=15"
+            + ("" if IS_LOCAL else " sslmode=require")
+        )
+        _conn = psycopg.connect(dsn)
+    return _conn
+
+
+def resp(status: int, body: dict) -> dict:
+    """Builds a Lambda HTTP response with CORS headers."""
+    return {
+        "statusCode": status,
+        "headers": {
+            "Content-Type": "application/json",
+            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Allow-Headers": "*",
+            "Access-Control-Allow-Methods": "*",
+        },
+        "body": json.dumps(body, default=str),
+    }
+
+
+def get_user(event: dict):
+    """Returns JWT payload if authenticated, or mock admin in local dev."""
+    if IS_LOCAL:
+        return {"sub": "dev-user", "email": "admin@acme.com", "name": "Dev Admin", "role": "admin"}
+    headers = event.get("headers") or {}
+    auth = headers.get("authorization") or headers.get("Authorization", "")
+    if not auth.startswith("Bearer "):
+        return None
+    try:
+        return jwt.decode(auth[7:], JWT_SECRET, algorithms=["HS256"])
+    except Exception:
+        return None
+
+
+UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", re.I)
+
+
+def extract_id(path: str):
+    """Extracts the first UUID segment from a request path."""
+    for segment in path.split("/"):
+        if UUID_RE.match(segment):
+            return segment
+    return None
+
+
+def rows_to_dicts(cursor) -> list:
+    cols = [d[0] for d in cursor.description]
+    return [dict(zip(cols, row)) for row in cursor.fetchall()]
+
+
+def row_to_dict(cursor, row) -> dict:
+    cols = [d[0] for d in cursor.description]
+    return dict(zip(cols, row))
+
+
+def init_db():
+    """Creates all tables idempotently. Safe to call on every cold start."""
+    conn = get_db()
+    with conn.cursor() as cur:
+        cur.execute(DDL)
+    conn.commit()
+    seed_default_admin()
+
+
+def hash_password(plain: str) -> str:
+    import hashlib, os, base64
+    salt = os.urandom(16)
+    iterations = 200_000
+    digest = hashlib.pbkdf2_hmac("sha256", plain.encode("utf-8"), salt, iterations)
+    return f"pbkdf2_sha256${iterations}${base64.b64encode(salt).decode()}${base64.b64encode(digest).decode()}"
+
+
+def verify_password(plain: str, hashed: str) -> bool:
+    if not hashed:
+        return False
+    try:
+        import hashlib, base64, hmac
+        algo, iter_s, salt_b64, hash_b64 = hashed.split("$", 3)
+        if algo != "pbkdf2_sha256":
+            return False
+        salt = base64.b64decode(salt_b64)
+        expected = base64.b64decode(hash_b64)
+        digest = hashlib.pbkdf2_hmac("sha256", plain.encode("utf-8"), salt, int(iter_s))
+        return hmac.compare_digest(digest, expected)
+    except Exception:
+        return False
+
+
+def seed_default_admin():
+    """Ensures a default admin/admin123 user exists for first-time login."""
+    admin_hash = hash_password("admin123")
+    conn = get_db()
+    with conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO users (username, email, name, user_role, password_hash, is_active) "
+            "VALUES (%s, %s, %s, %s, %s, TRUE) "
+            "ON CONFLICT (email) DO UPDATE SET "
+            "username = COALESCE(users.username, EXCLUDED.username), "
+            "password_hash = COALESCE(users.password_hash, EXCLUDED.password_hash), "
+            "user_role = 'admin', "
+            "is_active = TRUE",
+            ("admin", "admin@acme.com", "Administrator", "admin", admin_hash),
+        )
+    conn.commit()
+
+
+def calculate_health(data: dict) -> str:
+    """Derives RAG health from dates and budget. RED > AMBER > GREEN."""
+    today = date.today()
+    end_date = data.get("end_date")
+    planned = float(data.get("budget_planned") or 0)
+    consumed = float(data.get("budget_consumed") or 0)
+    if end_date:
+        if isinstance(end_date, str):
+            end_date = date.fromisoformat(end_date[:10])
+        days = (end_date - today).days
+        if days < 0:
+            return "red"
+        if days <= 7:
+            return "amber"
+    if planned > 0:
+        ratio = consumed / planned
+        if ratio > 1.0:
+            return "red"
+        if ratio > 0.8:
+            return "amber"
+    return "green"

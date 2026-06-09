@@ -95,6 +95,11 @@ else
     terraform init -reconfigure
 fi
 
+# Copy shared utilities into each Python service directory before packaging
+for fn in "$PROJECT_ROOT"/backend/*/function.py; do
+    cp "$PROJECT_ROOT/backend/shared.py" "$(dirname "$fn")/shared.py"
+done
+
 # Apply Terraform configuration automatically
 terraform apply -auto-approve
 echo "INFO: Infrastructure deployment complete!"

@@ -327,6 +327,11 @@ else
     echo -e "  Detected Mac/Windows - using host: host.docker.internal"
 fi
 
+# Copy shared utilities into each Python service directory before packaging
+for fn in "$PROJECT_ROOT"/backend/*/function.py; do
+    cp "$PROJECT_ROOT/backend/shared.py" "$(dirname "$fn")/shared.py"
+done
+
 # Install pip requirements into each Python service directory for hot-reload
 # Skip if requirements.txt hasn't changed since last install (avoids slow PyPI lookups)
 shopt -s nullglob

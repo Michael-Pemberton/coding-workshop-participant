@@ -91,18 +91,16 @@ const server = http.createServer((req, res) => {
   delete headers['sec-fetch-mode'];
   delete headers['sec-fetch-dest'];
 
-  // Keep only essential headers
+  // Override host so the upstream Lambda URL matches; forward everything else
+  // (authorization, content-length, etc.) so auth and request bodies work.
+  headers.host = target.host;
+
   const options = {
     hostname: target.hostname,
     port: target.port,
     path: target.path,
     method: req.method,
-    headers: {
-      'accept': headers.accept || 'application/json',
-      'content-type': headers['content-type'] || 'application/json',
-      'user-agent': headers['user-agent'] || 'proxy-server',
-      'host': target.host
-    }
+    headers,
   };
 
   const proxyReq = protocol.request(options, (proxyRes) => {
