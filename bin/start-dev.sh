@@ -249,14 +249,25 @@ if ! docker info > /dev/null 2>&1; then
 fi
 echo -e "  ✓ Docker is running"
 
+# Lambda container cold-start can exceed LocalStack's 20s default on
+# memory-pressured hosts, causing intermittent "Execution environment timed out
+# during startup" errors. Bump to 180s for headroom.
+export LAMBDA_RUNTIME_ENVIRONMENT_TIMEOUT="${LAMBDA_RUNTIME_ENVIRONMENT_TIMEOUT:-180}"
+
 # Check if LocalStack is running
 LOCALSTACK_OK=false
 LOCALSTACK_IMAGE="${LOCALSTACK_IMAGE:-localstack/localstack-pro}"
 if curl -s http://localhost:4566/_localstack/health > /dev/null 2>&1; then
     # Verify the correct image is running
     RUNNING_IMAGE=$(docker inspect localstack-main --format '{{.Config.Image}}' 2>/dev/null || echo "")
+    RUNNING_TIMEOUT=$(docker inspect localstack-main --format '{{range .Config.Env}}{{println .}}{{end}}' 2>/dev/null | grep '^LAMBDA_RUNTIME_ENVIRONMENT_TIMEOUT=' | cut -d= -f2)
     if [ "$RUNNING_IMAGE" != "$LOCALSTACK_IMAGE" ]; then
         echo -e "  ⚠ LocalStack running with wrong image ($RUNNING_IMAGE), expected $LOCALSTACK_IMAGE. Restarting..."
+        localstack stop
+        docker stop localstack-main 2>/dev/null || true
+        sleep 5
+    elif [ "$RUNNING_TIMEOUT" != "$LAMBDA_RUNTIME_ENVIRONMENT_TIMEOUT" ]; then
+        echo -e "  ⚠ LocalStack running with LAMBDA_RUNTIME_ENVIRONMENT_TIMEOUT=$RUNNING_TIMEOUT, expected $LAMBDA_RUNTIME_ENVIRONMENT_TIMEOUT. Restarting..."
         localstack stop
         docker stop localstack-main 2>/dev/null || true
         sleep 5
@@ -517,6 +528,20 @@ else
     cat /tmp/proxy-server.log | sed 's/^/    /'
     exit 1
 fi
+
+# Pre-warm Lambda containers in parallel so the first user request doesn't
+# race the LocalStack cold-start timeout.
+echo -e "  Pre-warming Lambda containers..."
+WARMUP_ENDPOINTS=$(node -e "
+  const env = require('fs').readFileSync('$FRONTEND_DIR/.env.local', 'utf8');
+  const m = env.match(/VITE_API_ENDPOINTS='(.+)'/);
+  if (m) console.log(Object.keys(JSON.parse(m[1])).join(' '));
+" 2>/dev/null)
+for ep in $WARMUP_ENDPOINTS; do
+    curl -s -o /dev/null --max-time 200 "http://localhost:3001/api/$ep" &
+done
+wait
+echo -e "  ✓ Lambda containers warmed"
 
 # Check if React dev server is already running
 REACT_RUNNING=false
