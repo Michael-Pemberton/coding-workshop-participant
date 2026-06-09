@@ -5,6 +5,7 @@ import logging
 
 from shared import (
     get_db, resp, get_user, extract_id, rows_to_dicts, row_to_dict, init_db,
+    filter_fields, VALID_BUDGET_CATEGORIES,
 )
 
 logger = logging.getLogger()
@@ -16,11 +17,30 @@ except Exception as exc:
     logger.error("DB init failed: %s", exc)
 
 
+def _validate_budget(body: dict) -> str | None:
+    """Returns an error string if the body is invalid, else None."""
+    for money_field in ("amount_planned", "amount_consumed"):
+        val = body.get(money_field)
+        if val is not None:
+            try:
+                f = float(val)
+                if f < 0:
+                    return f"{money_field} must not be negative"
+            except (TypeError, ValueError):
+                return f"{money_field} must be a number"
+    category = body.get("category")
+    if category is not None and category not in VALID_BUDGET_CATEGORIES:
+        return f"category must be one of: {sorted(VALID_BUDGET_CATEGORIES)}"
+    return None
+
+
 def sync_project_budget(conn, project_id: str):
     """Recalculates project.budget_consumed from sum of active budget items."""
     with conn.cursor() as cur:
         cur.execute(
-            "UPDATE projects SET budget_consumed = (SELECT COALESCE(SUM(amount_consumed),0) FROM budget_items WHERE project_id = %s AND is_deleted = FALSE), updated_at = NOW() WHERE id = %s",
+            "UPDATE projects SET "
+            "budget_consumed = (SELECT COALESCE(SUM(amount_consumed),0) FROM budget_items WHERE project_id = %s AND is_deleted = FALSE), "
+            "updated_at = NOW() WHERE id = %s",
             (project_id, project_id),
         )
     conn.commit()
@@ -51,10 +71,15 @@ def handler(event=None, context=None):
             if params.get("project_id"):
                 conditions.append("project_id = %s")
                 vals.append(params["project_id"])
+            try:
+                limit = min(int(params.get("limit", 100)), 500)
+                offset = int(params.get("offset", 0))
+            except (TypeError, ValueError):
+                return resp(400, {"error": "limit and offset must be integers", "success": False})
             with conn.cursor() as cur:
                 cur.execute(
-                    f"SELECT * FROM budget_items WHERE {' AND '.join(conditions)} ORDER BY created_at DESC",
-                    vals,
+                    f"SELECT * FROM budget_items WHERE {' AND '.join(conditions)} ORDER BY created_at DESC LIMIT %s OFFSET %s",
+                    vals + [limit, offset],
                 )
                 return resp(200, {"data": rows_to_dicts(cur), "success": True})
 
@@ -72,7 +97,10 @@ def handler(event=None, context=None):
             body = json.loads(event.get("body") or "{}")
             if not body.get("project_id"):
                 return resp(400, {"error": "project_id is required", "success": False})
-            body.pop("id", None)
+            body = filter_fields("budget_items", body)
+            err = _validate_budget(body)
+            if err:
+                return resp(400, {"error": err, "success": False})
             cols = list(body.keys())
             vals2 = list(body.values())
             with conn.cursor() as cur:
@@ -90,8 +118,12 @@ def handler(event=None, context=None):
             if user.get("role") not in ("admin", "manager"):
                 return resp(403, {"error": "Insufficient permissions", "success": False})
             body = json.loads(event.get("body") or "{}")
-            body.pop("id", None)
-            body.pop("created_at", None)
+            body = filter_fields("budget_items", body)
+            err = _validate_budget(body)
+            if err:
+                return resp(400, {"error": err, "success": False})
+            if not body:
+                return resp(400, {"error": "No valid fields to update", "success": False})
             set_clause = ", ".join([f"{k} = %s" for k in body.keys()])
             vals3 = list(body.values()) + [item_id]
             with conn.cursor() as cur:

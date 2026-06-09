@@ -12,7 +12,16 @@ import jwt
 logger = logging.getLogger(__name__)
 
 IS_LOCAL = os.getenv("IS_LOCAL", "false") == "true"
-JWT_SECRET = os.getenv("JWT_SECRET", "dev-secret-key-change-in-production")
+JWT_SECRET = os.getenv("JWT_SECRET", "")
+
+# Fail fast: refuse to start in production without a real secret.
+if not IS_LOCAL and not JWT_SECRET:
+    raise RuntimeError("JWT_SECRET environment variable must be set in production.")
+if not JWT_SECRET:
+    JWT_SECRET = "dev-secret-key-change-in-production"
+
+# Allowed CORS origins — set CORS_ORIGIN env var in production.
+CORS_ORIGIN = os.getenv("CORS_ORIGIN", "*")
 
 _conn = None
 
@@ -28,21 +37,63 @@ CREATE TABLE IF NOT EXISTS deliverables (id UUID PRIMARY KEY DEFAULT gen_random_
 CREATE TABLE IF NOT EXISTS budget_items (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), project_id UUID NOT NULL, category VARCHAR(100) NOT NULL DEFAULT 'other', description TEXT, amount_planned DECIMAL(15,2) DEFAULT 0.00, amount_consumed DECIMAL(15,2) DEFAULT 0.00, is_deleted BOOLEAN DEFAULT FALSE, created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(), updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW());
 """
 
+# ---------------------------------------------------------------------------
+# Field allowlists — only these columns may appear in INSERT/UPDATE payloads.
+# ---------------------------------------------------------------------------
+ALLOWED_FIELDS = {
+    "projects": {
+        "title", "description", "status", "health", "start_date", "end_date",
+        "budget_planned", "budget_consumed", "dependency_ids", "created_by",
+    },
+    "people": {
+        "name", "email", "title", "weekly_hours_capacity", "is_active",
+    },
+    "assignments": {
+        "person_id", "project_id", "role_on_project", "hours_per_week",
+        "start_date", "end_date",
+    },
+    "deliverables": {
+        "project_id", "title", "description", "status", "due_date", "depends_on_id",
+    },
+    "budget_items": {
+        "project_id", "category", "description", "amount_planned", "amount_consumed",
+    },
+}
+
+# Valid enum values
+VALID_STATUSES = {"projects": {"active", "on_hold", "completed", "cancelled"}}
+VALID_DELIVERABLE_STATUSES = {"pending", "in_progress", "completed", "cancelled"}
+VALID_HEALTH = {"green", "amber", "red"}
+VALID_BUDGET_CATEGORIES = {"staff", "tooling", "infrastructure", "travel", "other"}
+
+
+def filter_fields(table: str, body: dict) -> dict:
+    """Returns only the allowed fields for the given table, stripping unknown keys."""
+    allowed = ALLOWED_FIELDS.get(table, set())
+    return {k: v for k, v in body.items() if k in allowed}
+
 
 def get_db():
-    """Returns a reused PostgreSQL connection, reconnecting if closed."""
+    """Returns a reused PostgreSQL connection, reconnecting if closed or broken."""
     global _conn
-    if _conn is None or _conn.closed:
-        dsn = (
-            f"host={os.getenv('POSTGRES_HOST', 'localhost')} "
-            f"port={os.getenv('POSTGRES_PORT', '5432')} "
-            f"dbname={os.getenv('POSTGRES_NAME', 'postgres')} "
-            f"user={os.getenv('POSTGRES_USER', 'postgres')} "
-            f"password={os.getenv('POSTGRES_PASS', 'postgres123')} "
-            f"connect_timeout=15"
-            + ("" if IS_LOCAL else " sslmode=require")
-        )
-        _conn = psycopg.connect(dsn)
+    try:
+        if _conn is not None and not _conn.closed:
+            # Lightweight health check — catches stale connections.
+            _conn.execute("SELECT 1")
+            return _conn
+    except Exception:
+        _conn = None
+
+    dsn = (
+        f"host={os.getenv('POSTGRES_HOST', 'localhost')} "
+        f"port={os.getenv('POSTGRES_PORT', '5432')} "
+        f"dbname={os.getenv('POSTGRES_NAME', 'postgres')} "
+        f"user={os.getenv('POSTGRES_USER', 'postgres')} "
+        f"password={os.getenv('POSTGRES_PASS', 'postgres123')} "
+        f"connect_timeout=15"
+        + ("" if IS_LOCAL else " sslmode=require")
+    )
+    _conn = psycopg.connect(dsn)
     return _conn
 
 
@@ -52,9 +103,9 @@ def resp(status: int, body: dict) -> dict:
         "statusCode": status,
         "headers": {
             "Content-Type": "application/json",
-            "Access-Control-Allow-Origin": "*",
-            "Access-Control-Allow-Headers": "*",
-            "Access-Control-Allow-Methods": "*",
+            "Access-Control-Allow-Origin": CORS_ORIGIN,
+            "Access-Control-Allow-Headers": "Content-Type,Authorization",
+            "Access-Control-Allow-Methods": "GET,POST,PUT,DELETE,OPTIONS",
         },
         "body": json.dumps(body, default=str),
     }
@@ -70,7 +121,11 @@ def get_user(event: dict):
         return None
     try:
         return jwt.decode(auth[7:], JWT_SECRET, algorithms=["HS256"])
-    except Exception:
+    except jwt.ExpiredSignatureError:
+        logger.warning("JWT token has expired")
+        return None
+    except jwt.InvalidTokenError as exc:
+        logger.warning("Invalid JWT token: %s", exc)
         return None
 
 
@@ -105,8 +160,8 @@ def init_db():
 
 
 def hash_password(plain: str) -> str:
-    import hashlib, os, base64
-    salt = os.urandom(16)
+    import hashlib, os as _os, base64
+    salt = _os.urandom(16)
     iterations = 200_000
     digest = hashlib.pbkdf2_hmac("sha256", plain.encode("utf-8"), salt, iterations)
     return f"pbkdf2_sha256${iterations}${base64.b64encode(salt).decode()}${base64.b64encode(digest).decode()}"
@@ -129,7 +184,11 @@ def verify_password(plain: str, hashed: str) -> bool:
 
 
 def seed_default_admin():
-    """Ensures a default admin/admin123 user exists for first-time login."""
+    """
+    Ensures a default admin user exists for first-time login.
+    Only sets password/username if the account has none — never overwrites
+    a password that was already changed.
+    """
     admin_hash = hash_password("admin123")
     conn = get_db()
     with conn.cursor() as cur:

@@ -7,8 +7,13 @@ import jwt
 
 logger = logging.getLogger(__name__)
 
-JWT_SECRET = os.getenv("JWT_SECRET", "dev-secret-key-change-in-production")
+JWT_SECRET = os.getenv("JWT_SECRET", "")
 IS_LOCAL = os.getenv("IS_LOCAL", "false") == "true"
+
+if not IS_LOCAL and not JWT_SECRET:
+    raise RuntimeError("JWT_SECRET environment variable must be set in production.")
+if not JWT_SECRET:
+    JWT_SECRET = "dev-secret-key-change-in-production"
 
 
 def validate_token(event: dict) -> Optional[dict]:
@@ -39,6 +44,7 @@ def validate_token(event: dict) -> Optional[dict]:
 def require_auth(event: dict) -> dict:
     """
     Validates the JWT and returns the user payload.
+    In local dev mode returns a mock admin without checking the token.
 
     Args:
         event: Lambda event dict.

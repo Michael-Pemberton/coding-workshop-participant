@@ -28,6 +28,22 @@ ProtectedRoute.propTypes = {
 };
 
 /**
+ * Redirects non-admin users to the dashboard.
+ * Must be used inside a ProtectedRoute (assumes user is already authenticated).
+ * @param {object} props
+ * @param {React.ReactNode} props.children
+ */
+function AdminRoute({ children }) {
+  const { isAdmin, loading } = useAuth();
+  if (loading) return null;
+  return isAdmin() ? children : <Navigate to="/" replace />;
+}
+
+AdminRoute.propTypes = {
+  children: PropTypes.node.isRequired,
+};
+
+/**
  * Root application component defining all client-side routes.
  */
 function App() {
@@ -48,7 +64,14 @@ function App() {
         <Route path="people" element={<PeoplePage />} />
         <Route path="deliverables" element={<DeliverablesPage />} />
         <Route path="budgets" element={<BudgetsPage />} />
-        <Route path="admin/users" element={<AdminUsersPage />} />
+        <Route
+          path="admin/users"
+          element={
+            <AdminRoute>
+              <AdminUsersPage />
+            </AdminRoute>
+          }
+        />
       </Route>
       <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>

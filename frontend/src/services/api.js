@@ -14,9 +14,15 @@ client.interceptors.request.use((config) => {
 });
 
 // Unwrap the {data, success} envelope on success; surface error messages.
+// On 401, clear the stored token so the AuthContext will redirect to login.
 client.interceptors.response.use(
   (res) => (res.data && Object.prototype.hasOwnProperty.call(res.data, 'data') ? res.data.data : res.data),
   (err) => {
+    if (err.response?.status === 401) {
+      localStorage.removeItem('acme_jwt');
+      // Reload so AuthContext re-evaluates and redirects to /login.
+      window.location.href = '/login';
+    }
     const message =
       err.response?.data?.error || err.message || 'An unexpected error occurred';
     return Promise.reject(new Error(message));

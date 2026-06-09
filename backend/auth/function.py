@@ -18,10 +18,47 @@ logger.setLevel(logging.INFO)
 
 GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID", "")
 
+# Simple in-memory rate limiter for the password login endpoint.
+# Tracks failed attempts per username: {username: (count, first_failure_ts)}
+_failed_attempts: dict = {}
+_MAX_ATTEMPTS = 10
+_LOCKOUT_SECONDS = 300  # 5 minutes
+
 try:
     init_db()
 except Exception as exc:
     logger.error("DB init failed: %s", exc)
+
+
+def _check_rate_limit(username: str) -> bool:
+    """Returns True if the username is currently locked out."""
+    entry = _failed_attempts.get(username)
+    if not entry:
+        return False
+    count, first_ts = entry
+    elapsed = (datetime.now(tz=timezone.utc) - first_ts).total_seconds()
+    if elapsed > _LOCKOUT_SECONDS:
+        del _failed_attempts[username]
+        return False
+    return count >= _MAX_ATTEMPTS
+
+
+def _record_failure(username: str):
+    entry = _failed_attempts.get(username)
+    now = datetime.now(tz=timezone.utc)
+    if entry:
+        count, first_ts = entry
+        elapsed = (now - first_ts).total_seconds()
+        if elapsed > _LOCKOUT_SECONDS:
+            _failed_attempts[username] = (1, now)
+        else:
+            _failed_attempts[username] = (count + 1, first_ts)
+    else:
+        _failed_attempts[username] = (1, now)
+
+
+def _clear_failures(username: str):
+    _failed_attempts.pop(username, None)
 
 
 def get_user_from_token(event: dict):
@@ -32,7 +69,11 @@ def get_user_from_token(event: dict):
         return None
     try:
         return jwt.decode(auth[7:], JWT_SECRET, algorithms=["HS256"])
-    except Exception:
+    except jwt.ExpiredSignatureError:
+        logger.warning("JWT token has expired")
+        return None
+    except jwt.InvalidTokenError as exc:
+        logger.warning("Invalid JWT token: %s", exc)
         return None
 
 
@@ -114,22 +155,29 @@ VALID_ROLES = ("admin", "manager", "contributor", "viewer")
 
 
 def login_with_password(body: dict) -> dict:
-    """POST /api/auth/login — username + password login."""
+    """POST /api/auth/login — username + password login with rate limiting."""
     username = (body.get("username") or "").strip()
     password = body.get("password") or ""
     if not username or not password:
         return resp(400, {"error": "username and password are required", "success": False})
+
+    if _check_rate_limit(username):
+        return resp(429, {"error": "Too many failed attempts. Try again later.", "success": False})
+
     conn = get_db()
     with conn.cursor() as cur:
         cur.execute("SELECT * FROM users WHERE username = %s", (username,))
         row = cur.fetchone()
         if not row:
+            _record_failure(username)
             return resp(401, {"error": "Invalid credentials", "success": False})
         user = row_to_dict(cur, row)
     if not user.get("is_active", True):
         return resp(403, {"error": "Account is inactive", "success": False})
     if not verify_password(password, user.get("password_hash") or ""):
+        _record_failure(username)
         return resp(401, {"error": "Invalid credentials", "success": False})
+    _clear_failures(username)
     token = make_jwt(user)
     user.pop("password_hash", None)
     return resp(200, {"data": {"token": token, "user": user}, "success": True})
@@ -146,6 +194,8 @@ def create_user(body: dict) -> dict:
         return resp(400, {"error": "username, name, email, and password are required", "success": False})
     if role not in VALID_ROLES:
         return resp(400, {"error": f"role must be one of: {VALID_ROLES}", "success": False})
+    if len(password) < 8:
+        return resp(400, {"error": "password must be at least 8 characters", "success": False})
     conn = get_db()
     with conn.cursor() as cur:
         cur.execute("SELECT 1 FROM users WHERE username = %s OR email = %s", (username, email))
@@ -182,6 +232,8 @@ def update_user(user_id: str, body: dict) -> dict:
         fields.append("user_role = %s")
         values.append(body["role"])
     if body.get("password"):
+        if len(body["password"]) < 8:
+            return resp(400, {"error": "password must be at least 8 characters", "success": False})
         fields.append("password_hash = %s")
         values.append(hash_password(body["password"]))
     if "is_active" in body:

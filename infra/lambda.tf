@@ -10,7 +10,7 @@ module "lambda" {
   runtime         = each.value.runtime
   memory_size     = 128
   timeout         = 300
-  tracing_mode    = "PassThrough"
+  tracing_mode    = "Active"
   build_in_docker = false
   store_on_s3     = data.aws_caller_identity.this.id != "000000000000"
   s3_bucket       = data.aws_caller_identity.this.id != "000000000000" ? aws_s3_bucket.this.id : null
@@ -24,7 +24,7 @@ module "lambda" {
   }]
 
   vpc_security_group_ids = data.aws_security_groups.this.ids
-  vpc_subnet_ids         = local.public_subnet_ids
+  vpc_subnet_ids         = local.private_subnet_ids
   attach_network_policy  = true
 
   create_package     = true

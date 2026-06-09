@@ -2,9 +2,11 @@
 
 import json
 import logging
+import re
 
 from shared import (
     get_db, resp, get_user, extract_id, rows_to_dicts, row_to_dict, init_db,
+    filter_fields,
 )
 
 logger = logging.getLogger()
@@ -15,9 +17,33 @@ try:
 except Exception as exc:
     logger.error("DB init failed: %s", exc)
 
+_EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+
+
+def _validate_person(body: dict) -> str | None:
+    """Returns an error string if the body is invalid, else None."""
+    email = body.get("email")
+    if email is not None and not _EMAIL_RE.match(str(email)):
+        return "email must be a valid email address"
+    cap = body.get("weekly_hours_capacity")
+    if cap is not None:
+        try:
+            cap = int(cap)
+            if not (1 <= cap <= 168):
+                return "weekly_hours_capacity must be between 1 and 168"
+        except (TypeError, ValueError):
+            return "weekly_hours_capacity must be an integer"
+    return None
+
 
 def list_people(event: dict) -> dict:
     """GET /api/people — list all people with allocation info."""
+    params = event.get("queryStringParameters") or {}
+    try:
+        limit = min(int(params.get("limit", 100)), 500)
+        offset = int(params.get("offset", 0))
+    except (TypeError, ValueError):
+        return resp(400, {"error": "limit and offset must be integers", "success": False})
     conn = get_db()
     with conn.cursor() as cur:
         cur.execute(
@@ -29,7 +55,9 @@ def list_people(event: dict) -> dict:
             WHERE p.is_deleted = FALSE
             GROUP BY p.id
             ORDER BY p.name
-            """
+            LIMIT %s OFFSET %s
+            """,
+            (limit, offset),
         )
         rows = rows_to_dicts(cur)
     for r in rows:
@@ -102,12 +130,15 @@ def create_person(event: dict, user: dict) -> dict:
     if not body.get("email", "").strip():
         return resp(400, {"error": "email is required", "success": False})
     body["email"] = body["email"].lower().strip()
+    body = filter_fields("people", body)
+    err = _validate_person(body)
+    if err:
+        return resp(400, {"error": err, "success": False})
     conn = get_db()
     with conn.cursor() as cur:
         cur.execute("SELECT id FROM people WHERE email = %s AND is_deleted = FALSE", (body["email"],))
         if cur.fetchone():
-            return resp(400, {"error": f"Person with email {body['email']} already exists", "success": False})
-    body.pop("id", None)
+            return resp(409, {"error": f"Person with email {body['email']} already exists", "success": False})
     cols = list(body.keys())
     vals = list(body.values())
     with conn.cursor() as cur:
@@ -128,8 +159,12 @@ def update_person(event: dict, person_id: str, user: dict) -> dict:
         body = json.loads(event.get("body") or "{}")
     except json.JSONDecodeError:
         return resp(400, {"error": "Invalid JSON body", "success": False})
-    body.pop("id", None)
-    body.pop("created_at", None)
+    body = filter_fields("people", body)
+    err = _validate_person(body)
+    if err:
+        return resp(400, {"error": err, "success": False})
+    if not body:
+        return resp(400, {"error": "No valid fields to update", "success": False})
     set_clause = ", ".join([f"{k} = %s" for k in body.keys()])
     vals = list(body.values()) + [person_id]
     conn = get_db()

@@ -5,6 +5,7 @@ import logging
 
 from shared import (
     get_db, resp, get_user, extract_id, rows_to_dicts, row_to_dict, init_db,
+    filter_fields, VALID_DELIVERABLE_STATUSES,
 )
 
 logger = logging.getLogger()
@@ -14,6 +15,21 @@ try:
     init_db()
 except Exception as exc:
     logger.error("DB init failed: %s", exc)
+
+
+def _validate_deliverable(body: dict) -> str | None:
+    """Returns an error string if the body is invalid, else None."""
+    status = body.get("status")
+    if status is not None and status not in VALID_DELIVERABLE_STATUSES:
+        return f"status must be one of: {sorted(VALID_DELIVERABLE_STATUSES)}"
+    due_date = body.get("due_date")
+    if due_date is not None:
+        try:
+            from datetime import date
+            date.fromisoformat(str(due_date)[:10])
+        except ValueError:
+            return "due_date must be a valid ISO date (YYYY-MM-DD)"
+    return None
 
 
 def handler(event=None, context=None):
@@ -42,19 +58,30 @@ def handler(event=None, context=None):
                 conditions.append("d.project_id = %s")
                 vals.append(params["project_id"])
             if params.get("status"):
+                if params["status"] not in VALID_DELIVERABLE_STATUSES:
+                    return resp(400, {"error": f"status must be one of: {sorted(VALID_DELIVERABLE_STATUSES)}", "success": False})
                 conditions.append("d.status = %s")
                 vals.append(params["status"])
+            try:
+                limit = min(int(params.get("limit", 100)), 500)
+                offset = int(params.get("offset", 0))
+            except (TypeError, ValueError):
+                return resp(400, {"error": "limit and offset must be integers", "success": False})
             with conn.cursor() as cur:
                 cur.execute(
-                    f"SELECT d.*, dep.title AS depends_on_title FROM deliverables d LEFT JOIN deliverables dep ON dep.id = d.depends_on_id WHERE {' AND '.join(conditions)} ORDER BY d.created_at",
-                    vals,
+                    f"SELECT d.*, dep.title AS depends_on_title "
+                    f"FROM deliverables d LEFT JOIN deliverables dep ON dep.id = d.depends_on_id "
+                    f"WHERE {' AND '.join(conditions)} ORDER BY d.created_at LIMIT %s OFFSET %s",
+                    vals + [limit, offset],
                 )
                 return resp(200, {"data": rows_to_dicts(cur), "success": True})
 
         if method == "GET" and item_id:
             with conn.cursor() as cur:
                 cur.execute(
-                    "SELECT d.*, dep.title AS depends_on_title FROM deliverables d LEFT JOIN deliverables dep ON dep.id = d.depends_on_id WHERE d.id = %s AND d.is_deleted = FALSE",
+                    "SELECT d.*, dep.title AS depends_on_title "
+                    "FROM deliverables d LEFT JOIN deliverables dep ON dep.id = d.depends_on_id "
+                    "WHERE d.id = %s AND d.is_deleted = FALSE",
                     (item_id,),
                 )
                 row = cur.fetchone()
@@ -70,7 +97,10 @@ def handler(event=None, context=None):
                 return resp(400, {"error": "title is required", "success": False})
             if not body.get("project_id"):
                 return resp(400, {"error": "project_id is required", "success": False})
-            body.pop("id", None)
+            body = filter_fields("deliverables", body)
+            err = _validate_deliverable(body)
+            if err:
+                return resp(400, {"error": err, "success": False})
             cols = list(body.keys())
             vals2 = list(body.values())
             with conn.cursor() as cur:
@@ -86,8 +116,12 @@ def handler(event=None, context=None):
             if user.get("role") not in ("admin", "manager", "contributor"):
                 return resp(403, {"error": "Insufficient permissions", "success": False})
             body = json.loads(event.get("body") or "{}")
-            body.pop("id", None)
-            body.pop("created_at", None)
+            body = filter_fields("deliverables", body)
+            err = _validate_deliverable(body)
+            if err:
+                return resp(400, {"error": err, "success": False})
+            if not body:
+                return resp(400, {"error": "No valid fields to update", "success": False})
             set_clause = ", ".join([f"{k} = %s" for k in body.keys()])
             vals3 = list(body.values()) + [item_id]
             with conn.cursor() as cur:

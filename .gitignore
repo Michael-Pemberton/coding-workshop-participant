@@ -256,3 +256,18 @@ tfplan
 
 # Snyk Security Extension - AI Rules (auto-generated)
 .github/instructions/snyk_rules.instructions.md
+
+# Lambda vendored dependencies — installed at build time, not committed
+backend/*/certifi/
+backend/*/charset_normalizer/
+backend/*/idna/
+backend/*/jwt/
+backend/*/psycopg/
+backend/*/psycopg_binary/
+backend/*/psycopg_binary.libs/
+backend/*/requests/
+backend/*/urllib3/
+backend/*/typing_extensions.py
+backend/*/*.dist-info/
+backend/*/.pip_installed
+backend/*/bin/
