@@ -8,7 +8,7 @@ module "lambda" {
   architectures   = [each.value.arch]
   handler         = each.value.handler
   runtime         = each.value.runtime
-  memory_size     = 128
+  memory_size     = 512
   timeout         = 300
   tracing_mode    = "Active"
   build_in_docker = false
@@ -50,7 +50,7 @@ module "lambda" {
 
   cors = {
     allow_credentials = false
-    allow_headers     = ["*"]
+    allow_headers     = ["content-type", "authorization"]
     allow_methods     = ["*"]
     allow_origins     = ["*"]
     expose_headers    = []

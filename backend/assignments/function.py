@@ -4,17 +4,12 @@ import json
 import logging
 
 from shared import (
-    get_db, resp, get_user, extract_id, rows_to_dicts, row_to_dict, init_db,
+    get_db, resp, get_user, extract_id, rows_to_dicts, row_to_dict,
     filter_fields, UUID_RE,
 )
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
-
-try:
-    init_db()
-except Exception as exc:
-    logger.error("DB init failed: %s", exc)
 
 # Validated integer fields and their allowed range.
 _INT_FIELDS = {"hours_per_week": (0, 168)}
@@ -186,7 +181,7 @@ def handler(event=None, context=None):
         return resp(405, {"error": "Method not allowed", "success": False})
     except Exception as exc:
         logger.error("Error: %s", exc, exc_info=True)
-        return resp(500, {"error": "Internal server error", "success": False})
+        return resp(500, {"error": f"{type(exc).__name__}: {exc}", "success": False})
 
 
 if __name__ == "__main__":

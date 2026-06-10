@@ -36,6 +36,7 @@ const EMPTY_FORM = {
   password: '',
   role: 'viewer',
 };
+const DRAFT_KEY = 'adminUsers:newDraft';
 
 /**
  * Admin-only user management page: create, edit role/password, deactivate.
@@ -49,6 +50,8 @@ function AdminUsersPage() {
   const [editing, setEditing] = useState(null);
   const [form, setForm] = useState(EMPTY_FORM);
   const [saving, setSaving] = useState(false);
+  const [saveError, setSaveError] = useState('');
+  const [fieldErrors, setFieldErrors] = useState({});
   const [confirmDelete, setConfirmDelete] = useState(null);
 
   const fetchUsers = useCallback(async () => {
@@ -72,8 +75,29 @@ function AdminUsersPage() {
 
   const openCreate = () => {
     setEditing(null);
-    setForm(EMPTY_FORM);
+    const saved = localStorage.getItem(DRAFT_KEY);
+    if (saved) {
+      try { setForm({ ...EMPTY_FORM, ...JSON.parse(saved), password: '' }); }
+      catch { setForm(EMPTY_FORM); }
+    } else {
+      setForm(EMPTY_FORM);
+    }
+    setSaveError('');
+    setFieldErrors({});
     setDialogOpen(true);
+  };
+
+  useEffect(() => {
+    if (dialogOpen && !editing) {
+      const { password, ...rest } = form;
+      localStorage.setItem(DRAFT_KEY, JSON.stringify(rest));
+    }
+  }, [form, dialogOpen, editing]);
+
+  const handleClearForm = () => {
+    setForm(EMPTY_FORM);
+    localStorage.removeItem(DRAFT_KEY);
+    setFieldErrors({});
   };
 
   const openEdit = (u) => {
@@ -85,12 +109,21 @@ function AdminUsersPage() {
       password: '',
       role: u.user_role ?? 'viewer',
     });
+    setSaveError('');
+    setFieldErrors({});
     setDialogOpen(true);
   };
 
   const handleSave = async () => {
+    const errs = {};
+    if (!form.name.trim()) errs.name = 'Missing required field';
+    if (!form.username.trim()) errs.username = 'Missing required field';
+    if (!form.email.trim()) errs.email = 'Missing required field';
+    if (!editing && !form.password) errs.password = 'Missing required field';
+    if (Object.keys(errs).length) { setFieldErrors(errs); return; }
+    setFieldErrors({});
     setSaving(true);
-    setError('');
+    setSaveError('');
     try {
       if (editing) {
         const payload = {
@@ -103,11 +136,12 @@ function AdminUsersPage() {
         await authApi.updateUser(editing.id, payload);
       } else {
         await authApi.createUser(form);
+        localStorage.removeItem(DRAFT_KEY);
       }
       setDialogOpen(false);
       await fetchUsers();
     } catch (err) {
-      setError(err.message);
+      setSaveError(err.message);
     } finally {
       setSaving(false);
     }
@@ -127,13 +161,6 @@ function AdminUsersPage() {
   };
 
   if (loading) return <LoadingOverlay />;
-
-  const canSubmit =
-    form.username.trim() &&
-    form.name.trim() &&
-    form.email.trim() &&
-    (editing || form.password) &&
-    ROLES.includes(form.role);
 
   return (
     <Box>
@@ -201,19 +228,28 @@ function AdminUsersPage() {
         </TableBody>
       </Table>
 
-      <Dialog open={dialogOpen} onClose={() => setDialogOpen(false)} maxWidth="xs" fullWidth>
+      <Dialog open={dialogOpen} onClose={() => { setDialogOpen(false); setSaveError(''); setFieldErrors({}); }} maxWidth="xs" fullWidth>
         <DialogTitle>{editing ? 'Edit User' : 'New User'}</DialogTitle>
-        <DialogContent sx={{ display: 'flex', flexDirection: 'column', gap: 2, pt: 2 }}>
+        <DialogContent sx={{ display: 'flex', flexDirection: 'column', gap: 2, pt: 3 }}>
+          {saveError && (
+            <Box sx={{ bgcolor: 'error.light', color: 'error.contrastText', p: 1.5, borderRadius: 1, fontSize: 14 }}>
+              {saveError}
+            </Box>
+          )}
           <TextField
             label="Name *"
             value={form.name}
             onChange={(e) => setForm((f) => ({ ...f, name: e.target.value }))}
+            error={!!fieldErrors.name}
+            helperText={fieldErrors.name}
             fullWidth
           />
           <TextField
             label="Username *"
             value={form.username}
             onChange={(e) => setForm((f) => ({ ...f, username: e.target.value }))}
+            error={!!fieldErrors.username}
+            helperText={fieldErrors.username}
             fullWidth
           />
           <TextField
@@ -221,6 +257,8 @@ function AdminUsersPage() {
             type="email"
             value={form.email}
             onChange={(e) => setForm((f) => ({ ...f, email: e.target.value }))}
+            error={!!fieldErrors.email}
+            helperText={fieldErrors.email}
             fullWidth
           />
           <TextField
@@ -228,6 +266,8 @@ function AdminUsersPage() {
             type="password"
             value={form.password}
             onChange={(e) => setForm((f) => ({ ...f, password: e.target.value }))}
+            error={!!fieldErrors.password}
+            helperText={fieldErrors.password}
             fullWidth
           />
           <TextField
@@ -245,8 +285,10 @@ function AdminUsersPage() {
           </TextField>
         </DialogContent>
         <DialogActions>
-          <Button onClick={() => setDialogOpen(false)}>Cancel</Button>
-          <Button onClick={handleSave} variant="contained" disabled={!canSubmit || saving}>
+          {!editing && <Button onClick={handleClearForm} disabled={saving} color="inherit">Clear</Button>}
+          <Box sx={{ flexGrow: 1 }} />
+          <Button onClick={() => { setDialogOpen(false); setSaveError(''); setFieldErrors({}); }}>Cancel</Button>
+          <Button onClick={handleSave} variant="contained" disabled={saving}>
             Save
           </Button>
         </DialogActions>

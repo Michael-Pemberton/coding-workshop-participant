@@ -4,17 +4,12 @@ import json
 import logging
 
 from shared import (
-    get_db, resp, get_user, extract_id, rows_to_dicts, row_to_dict, init_db,
+    get_db, resp, get_user, extract_id, rows_to_dicts, row_to_dict,
     filter_fields, VALID_BUDGET_CATEGORIES,
 )
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
-
-try:
-    init_db()
-except Exception as exc:
-    logger.error("DB init failed: %s", exc)
 
 
 def _validate_budget(body: dict) -> str | None:
@@ -35,15 +30,109 @@ def _validate_budget(body: dict) -> str | None:
 
 
 def sync_project_budget(conn, project_id: str):
-    """Recalculates project.budget_consumed from sum of active budget items."""
+    """Raises project.budget_consumed if items sum exceeds it. Never lowers — preserves unallocated headroom."""
     with conn.cursor() as cur:
         cur.execute(
             "UPDATE projects SET "
-            "budget_consumed = (SELECT COALESCE(SUM(amount_consumed),0) FROM budget_items WHERE project_id = %s AND is_deleted = FALSE), "
+            "budget_consumed = GREATEST(COALESCE(budget_consumed,0), "
+            "(SELECT COALESCE(SUM(amount_consumed),0) FROM budget_items WHERE project_id = %s AND is_deleted = FALSE)), "
             "updated_at = NOW() WHERE id = %s",
             (project_id, project_id),
         )
     conn.commit()
+
+
+def _project_weeks(conn, project_id: str) -> float:
+    """Returns the project's duration in weeks (end - start)/7. 0 if dates missing."""
+    with conn.cursor() as cur:
+        cur.execute("SELECT start_date, end_date FROM projects WHERE id = %s AND is_deleted = FALSE", (project_id,))
+        row = cur.fetchone()
+    if not row or not row[0] or not row[1]:
+        return 0.0
+    days = (row[1] - row[0]).days
+    return max(0.0, days / 7.0)
+
+
+def list_staff_budget(conn, project_id: str) -> dict:
+    """Computes per-person planned/actual for a project from assignments × hourly_pay × weeks,
+    layered with any per-row overrides from staff_budget_overrides."""
+    weeks = _project_weeks(conn, project_id)
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT a.person_id, p.name, p.hourly_pay, a.role_on_project, a.hours_per_week,
+                   o.amount_planned, o.amount_consumed
+            FROM assignments a
+            JOIN people p ON p.id = a.person_id AND p.is_deleted = FALSE
+            LEFT JOIN staff_budget_overrides o
+              ON o.project_id = a.project_id AND o.person_id = a.person_id AND o.is_deleted = FALSE
+            WHERE a.project_id = %s AND a.is_deleted = FALSE
+            ORDER BY p.name
+            """,
+            (project_id,),
+        )
+        rows = cur.fetchall()
+    items = []
+    for person_id, name, hourly_pay, role, hours, ov_planned, ov_consumed in rows:
+        rate = float(hourly_pay or 0)
+        hpw = float(hours or 0)
+        planned_auto = round(rate * hpw * weeks, 2)
+        planned_eff = float(ov_planned) if ov_planned is not None else planned_auto
+        consumed_eff = float(ov_consumed) if ov_consumed is not None else 0.0
+        items.append({
+            "person_id": str(person_id),
+            "name": name,
+            "role_on_project": role,
+            "hours_per_week": hpw,
+            "hourly_pay": rate,
+            "weeks": round(weeks, 2),
+            "amount_planned_auto": planned_auto,
+            "amount_planned": planned_eff,
+            "amount_consumed": consumed_eff,
+            "planned_overridden": ov_planned is not None,
+            "consumed_overridden": ov_consumed is not None,
+        })
+    return {
+        "items": items,
+        "weeks": round(weeks, 2),
+        "total_planned": round(sum(i["amount_planned"] for i in items), 2),
+        "total_consumed": round(sum(i["amount_consumed"] for i in items), 2),
+    }
+
+
+def upsert_staff_override(conn, body: dict) -> dict | None:
+    """Upserts a per-person override. Null fields clear the override (fall back to auto)."""
+    project_id = body.get("project_id")
+    person_id = body.get("person_id")
+    if not project_id or not person_id:
+        return {"error": "project_id and person_id are required"}
+    for k in ("amount_planned", "amount_consumed"):
+        v = body.get(k)
+        if v is not None and v != "":
+            try:
+                if float(v) < 0:
+                    return {"error": f"{k} must not be negative"}
+            except (TypeError, ValueError):
+                return {"error": f"{k} must be a number"}
+    ap = body.get("amount_planned")
+    ac = body.get("amount_consumed")
+    ap = None if ap == "" or ap is None else float(ap)
+    ac = None if ac == "" or ac is None else float(ac)
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO staff_budget_overrides (project_id, person_id, amount_planned, amount_consumed)
+            VALUES (%s, %s, %s, %s)
+            ON CONFLICT (project_id, person_id) DO UPDATE
+            SET amount_planned = EXCLUDED.amount_planned,
+                amount_consumed = EXCLUDED.amount_consumed,
+                is_deleted = FALSE,
+                updated_at = NOW()
+            """,
+            (project_id, person_id, ap, ac),
+        )
+    conn.commit()
+    return None
 
 
 def handler(event=None, context=None):
@@ -63,6 +152,33 @@ def handler(event=None, context=None):
     item_id = extract_id(path)
     params = event.get("queryStringParameters") or {}
     conn = get_db()
+
+    # Sub-routes for the computed/override staff budget.
+    if path.endswith("/staff"):
+        if method != "GET":
+            return resp(405, {"error": "Method not allowed", "success": False})
+        pid = params.get("project_id")
+        if not pid:
+            return resp(400, {"error": "project_id is required", "success": False})
+        try:
+            return resp(200, {"data": list_staff_budget(conn, pid), "success": True})
+        except Exception as exc:
+            logger.error("staff list error: %s", exc, exc_info=True)
+            return resp(500, {"error": f"{type(exc).__name__}: {exc}", "success": False})
+
+    if path.endswith("/staff/override"):
+        if method != "PUT":
+            return resp(405, {"error": "Method not allowed", "success": False})
+        if user.get("role") not in ("admin", "manager"):
+            return resp(403, {"error": "Insufficient permissions", "success": False})
+        try:
+            body = json.loads(event.get("body") or "{}")
+        except json.JSONDecodeError:
+            return resp(400, {"error": "Invalid JSON body", "success": False})
+        err = upsert_staff_override(conn, body)
+        if err:
+            return resp(400, {"error": err["error"], "success": False})
+        return resp(200, {"data": list_staff_budget(conn, body["project_id"]), "success": True})
 
     try:
         if method == "GET" and not item_id:
@@ -162,7 +278,7 @@ def handler(event=None, context=None):
         return resp(405, {"error": "Method not allowed", "success": False})
     except Exception as exc:
         logger.error("Error: %s", exc, exc_info=True)
-        return resp(500, {"error": "Internal server error", "success": False})
+        return resp(500, {"error": f"{type(exc).__name__}: {exc}", "success": False})
 
 
 if __name__ == "__main__":

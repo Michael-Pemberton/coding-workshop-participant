@@ -113,6 +113,11 @@ if [ "$PG_OK" = false ]; then
     done
 fi
 
+# Apply DB schema + seed admin once, here on the host. The Lambdas no longer
+# run init_db() on cold start — keeps cold starts fast and avoids the flaky
+# Docker→host PG hop during module load.
+"$SCRIPT_DIR/init-db.sh" || { echo -e "  ✗ DB init failed"; exit 1; }
+
 echo ""
 
 # ============================================================
@@ -250,9 +255,10 @@ fi
 echo -e "  ✓ Docker is running"
 
 # Lambda container cold-start can exceed LocalStack's 20s default on
-# memory-pressured hosts, causing intermittent "Execution environment timed out
-# during startup" errors. Bump to 180s for headroom.
-export LAMBDA_RUNTIME_ENVIRONMENT_TIMEOUT="${LAMBDA_RUNTIME_ENVIRONMENT_TIMEOUT:-180}"
+# memory-pressured hosts. Bump to 300s to match the function timeout and
+# keep containers alive for 10 min so repeated script runs skip cold starts.
+export LAMBDA_RUNTIME_ENVIRONMENT_TIMEOUT="${LAMBDA_RUNTIME_ENVIRONMENT_TIMEOUT:-300}"
+export LAMBDA_KEEPALIVE_MS="${LAMBDA_KEEPALIVE_MS:-600000}"
 
 # Check if LocalStack is running
 LOCALSTACK_OK=false
@@ -261,13 +267,14 @@ if curl -s http://localhost:4566/_localstack/health > /dev/null 2>&1; then
     # Verify the correct image is running
     RUNNING_IMAGE=$(docker inspect localstack-main --format '{{.Config.Image}}' 2>/dev/null || echo "")
     RUNNING_TIMEOUT=$(docker inspect localstack-main --format '{{range .Config.Env}}{{println .}}{{end}}' 2>/dev/null | grep '^LAMBDA_RUNTIME_ENVIRONMENT_TIMEOUT=' | cut -d= -f2)
+    RUNNING_KEEPALIVE=$(docker inspect localstack-main --format '{{range .Config.Env}}{{println .}}{{end}}' 2>/dev/null | grep '^LAMBDA_KEEPALIVE_MS=' | cut -d= -f2)
     if [ "$RUNNING_IMAGE" != "$LOCALSTACK_IMAGE" ]; then
         echo -e "  ⚠ LocalStack running with wrong image ($RUNNING_IMAGE), expected $LOCALSTACK_IMAGE. Restarting..."
         localstack stop
         docker stop localstack-main 2>/dev/null || true
         sleep 5
-    elif [ "$RUNNING_TIMEOUT" != "$LAMBDA_RUNTIME_ENVIRONMENT_TIMEOUT" ]; then
-        echo -e "  ⚠ LocalStack running with LAMBDA_RUNTIME_ENVIRONMENT_TIMEOUT=$RUNNING_TIMEOUT, expected $LAMBDA_RUNTIME_ENVIRONMENT_TIMEOUT. Restarting..."
+    elif [ "$RUNNING_TIMEOUT" != "$LAMBDA_RUNTIME_ENVIRONMENT_TIMEOUT" ] || [ "$RUNNING_KEEPALIVE" != "$LAMBDA_KEEPALIVE_MS" ]; then
+        echo -e "  ⚠ LocalStack config mismatch (timeout=$RUNNING_TIMEOUT, keepalive=$RUNNING_KEEPALIVE). Restarting..."
         localstack stop
         docker stop localstack-main 2>/dev/null || true
         sleep 5
@@ -537,11 +544,36 @@ WARMUP_ENDPOINTS=$(node -e "
   const m = env.match(/VITE_API_ENDPOINTS='(.+)'/);
   if (m) console.log(Object.keys(JSON.parse(m[1])).join(' '));
 " 2>/dev/null)
-for ep in $WARMUP_ENDPOINTS; do
-    curl -s -o /dev/null --max-time 200 "http://localhost:3001/api/$ep" &
-done
-wait
-echo -e "  ✓ Lambda containers warmed"
+if [ -z "$WARMUP_ENDPOINTS" ]; then
+    echo -e "  ✗ No warmup endpoints found (check VITE_API_ENDPOINTS in .env.local)"
+else
+    _warmup_one() {
+        local ep="$1"
+        for attempt in 1 2 3; do
+            local start code elapsed
+            start=$(date +%s)
+            code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 350 "http://localhost:3001/api/$ep")
+            elapsed=$(( $(date +%s) - start ))
+            echo "    - $ep (attempt $attempt): HTTP $code in ${elapsed}s"
+            if [ "$code" = "200" ] || [ "$code" = "401" ] || [ "$code" = "403" ] || [ "$code" = "404" ]; then
+                return 0
+            fi
+            if [ "$attempt" -eq 3 ]; then
+                echo "    ⚠ $ep failed to warm after 3 attempts"
+            fi
+        done
+        return 0
+    }
+    declare -a _WARMUP_PIDS=()
+    for ep in $WARMUP_ENDPOINTS; do
+        _warmup_one "$ep" &
+        _WARMUP_PIDS+=($!)
+    done
+    for pid in "${_WARMUP_PIDS[@]}"; do
+        wait "$pid" || true
+    done
+    echo -e "  ✓ Lambda containers warmed"
+fi
 
 # Check if React dev server is already running
 REACT_RUNNING=false
@@ -573,19 +605,11 @@ if [ "$REACT_RUNNING" = true ]; then
     echo "  Frontend: http://localhost:3000"
     echo "  Backend:  http://localhost:3001"
 else
-    echo "Starting React development server..."
+    echo "Starting React development server in background..."
+    nohup npm run dev > /tmp/react-dev.log 2>&1 &
+    REACT_PID=$!
+    echo $REACT_PID > /tmp/react-dev.pid
+    echo "  React dev server started (PID: $REACT_PID, log: /tmp/react-dev.log)"
     echo "  Frontend: http://localhost:3000"
     echo "  Backend:  http://localhost:3001"
-    echo ""
-    echo "Press Ctrl+C to stop"
-    echo ""
-
-    # Cleanup: Kill proxy server when script exits
-    if [ -f /tmp/proxy-server.pid ]; then
-        PROXY_PID=$(cat /tmp/proxy-server.pid)
-        trap "kill $PROXY_PID 2>/dev/null; rm -f /tmp/proxy-server.pid" EXIT
-    fi
-
-    # Start React development server
-    npm run dev
 fi

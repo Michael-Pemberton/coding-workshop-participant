@@ -27,6 +27,22 @@ import ErrorAlert from '../components/ErrorAlert.jsx';
 
 const STATUS_OPTIONS = ['active', 'inactive', 'completed', 'on_hold', 'cancelled'];
 const HEALTH_OPTIONS = ['green', 'amber', 'red'];
+
+// Strip non-numeric input (keeps one decimal point) so the stored value is always a clean numeric string.
+function parseMoney(input) {
+  const cleaned = String(input).replace(/[^\d.]/g, '');
+  const parts = cleaned.split('.');
+  return parts.length > 1 ? `${parts[0]}.${parts.slice(1).join('')}` : parts[0];
+}
+
+// Render with thousands separators; preserves a trailing "." or partial decimals while typing.
+function formatMoney(value) {
+  if (value === '' || value == null) return '';
+  const [int, dec] = String(value).split('.');
+  const withCommas = Number(int || 0).toLocaleString('en-US');
+  return dec !== undefined ? `${withCommas}.${dec}` : withCommas;
+}
+
 const EMPTY_FORM = {
   title: '',
   description: '',
@@ -38,16 +54,16 @@ const EMPTY_FORM = {
   budget_consumed: '',
   dependency_ids: [],
 };
+const DRAFT_KEY = 'projects:newDraft';
 
 /**
  * Project create/edit form dialog.
  */
-function ProjectFormDialog({ open, project, allProjects, onSave, onClose, saving }) {
-  const [form, setForm] = useState(EMPTY_FORM);
+function ProjectFormDialog({ open, project, allProjects, onSave, onClose, saving, saveError, form, setForm }) {
   const [errors, setErrors] = useState({});
 
   useEffect(() => {
-    if (project) {
+    if (open && project) {
       setForm({
         title: project.title || '',
         description: project.description || '',
@@ -59,15 +75,21 @@ function ProjectFormDialog({ open, project, allProjects, onSave, onClose, saving
         budget_consumed: project.budget_consumed ?? '',
         dependency_ids: project.dependency_ids || [],
       });
-    } else {
-      setForm(EMPTY_FORM);
+    } else if (open && !project) {
+      const saved = localStorage.getItem(DRAFT_KEY);
+      if (saved) { try { setForm({ ...EMPTY_FORM, ...JSON.parse(saved) }); } catch { setForm(EMPTY_FORM); } }
+      else setForm(EMPTY_FORM);
     }
-    setErrors({});
-  }, [project, open]);
+    if (open) setErrors({});
+  }, [project, open, setForm]);
+
+  useEffect(() => {
+    if (open && !project) localStorage.setItem(DRAFT_KEY, JSON.stringify(form));
+  }, [form, open, project]);
 
   const validate = () => {
     const e = {};
-    if (!form.title.trim()) e.title = 'Title is required';
+    if (!form.title.trim()) e.title = 'Missing required field';
     return e;
   };
 
@@ -77,6 +99,12 @@ function ProjectFormDialog({ open, project, allProjects, onSave, onClose, saving
     onSave(form);
   };
 
+  const handleClear = () => {
+    setForm(EMPTY_FORM);
+    localStorage.removeItem(DRAFT_KEY);
+    setErrors({});
+  };
+
   const set = (field) => (ev) => setForm((f) => ({ ...f, [field]: ev.target.value }));
 
   const depOptions = allProjects.filter((p) => p.id !== project?.id);
@@ -84,7 +112,12 @@ function ProjectFormDialog({ open, project, allProjects, onSave, onClose, saving
   return (
     <Dialog open={open} onClose={onClose} maxWidth="sm" fullWidth>
       <DialogTitle>{project ? 'Edit Project' : 'New Project'}</DialogTitle>
-      <DialogContent sx={{ display: 'flex', flexDirection: 'column', gap: 2, pt: 2 }}>
+      <DialogContent sx={{ display: 'flex', flexDirection: 'column', gap: 2, pt: 3 }}>
+        {saveError && (
+          <Box sx={{ bgcolor: 'error.light', color: 'error.contrastText', p: 1.5, borderRadius: 1, fontSize: 14 }}>
+            {saveError}
+          </Box>
+        )}
         <TextField
           label="Title *"
           value={form.title}
@@ -138,18 +171,18 @@ function ProjectFormDialog({ open, project, allProjects, onSave, onClose, saving
         <Box sx={{ display: 'flex', gap: 2 }}>
           <TextField
             label="Budget Planned"
-            type="number"
-            value={form.budget_planned}
-            onChange={set('budget_planned')}
+            value={formatMoney(form.budget_planned)}
+            onChange={(e) => setForm((f) => ({ ...f, budget_planned: parseMoney(e.target.value) }))}
             fullWidth
+            inputProps={{ inputMode: 'decimal' }}
             InputProps={{ startAdornment: <InputAdornment position="start">$</InputAdornment> }}
           />
           <TextField
             label="Budget Consumed"
-            type="number"
-            value={form.budget_consumed}
-            onChange={set('budget_consumed')}
+            value={formatMoney(form.budget_consumed)}
+            onChange={(e) => setForm((f) => ({ ...f, budget_consumed: parseMoney(e.target.value) }))}
             fullWidth
+            inputProps={{ inputMode: 'decimal' }}
             InputProps={{ startAdornment: <InputAdornment position="start">$</InputAdornment> }}
           />
         </Box>
@@ -170,6 +203,8 @@ function ProjectFormDialog({ open, project, allProjects, onSave, onClose, saving
         </TextField>
       </DialogContent>
       <DialogActions>
+        {!project && <Button onClick={handleClear} disabled={saving} color="inherit">Clear</Button>}
+        <Box sx={{ flexGrow: 1 }} />
         <Button onClick={onClose} disabled={saving}>Cancel</Button>
         <Button onClick={handleSubmit} variant="contained" disabled={saving}>
           {saving ? 'Saving…' : 'Save'}
@@ -186,8 +221,11 @@ ProjectFormDialog.propTypes = {
   onSave: PropTypes.func.isRequired,
   onClose: PropTypes.func.isRequired,
   saving: PropTypes.bool.isRequired,
+  saveError: PropTypes.string,
+  form: PropTypes.object.isRequired,
+  setForm: PropTypes.func.isRequired,
 };
-ProjectFormDialog.defaultProps = { project: null };
+ProjectFormDialog.defaultProps = { project: null, saveError: '' };
 
 /**
  * Projects list page with DataGrid, filters, and CRUD dialogs.
@@ -206,6 +244,8 @@ function ProjectsPage() {
   const [saving, setSaving] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState(null);
   const [deleting, setDeleting] = useState(false);
+  const [form, setForm] = useState(EMPTY_FORM);
+  const [saveError, setSaveError] = useState('');
 
   const fetchProjects = useCallback(async () => {
     setLoading(true);
@@ -229,19 +269,27 @@ function ProjectsPage() {
     return true;
   });
 
-  const handleSave = async (form) => {
+  const handleSave = async (data) => {
     setSaving(true);
+    setSaveError('');
     try {
+      const payload = { ...data };
+      // Backend rejects "" for date/money fields — strip empties so they're treated as unset.
+      ['start_date', 'end_date', 'budget_planned', 'budget_consumed'].forEach((k) => {
+        if (payload[k] === '' || payload[k] == null) delete payload[k];
+      });
       if (editing) {
-        await projectsApi.update(editing.id, form);
+        await projectsApi.update(editing.id, payload);
       } else {
-        await projectsApi.create(form);
+        await projectsApi.create(payload);
+        localStorage.removeItem(DRAFT_KEY);
       }
       setFormOpen(false);
       setEditing(null);
+      setForm(EMPTY_FORM);
       await fetchProjects();
     } catch (err) {
-      setError(err.message);
+      setSaveError(err.message);
     } finally {
       setSaving(false);
     }
@@ -272,25 +320,25 @@ function ProjectsPage() {
       field: 'health',
       headerName: 'Health',
       width: 110,
-      renderCell: ({ value }) => <HealthChip health={value} />,
+      renderCell: ({ value, row }) => <HealthChip health={value} reason={row.health_reason} />,
     },
     {
       field: 'start_date',
       headerName: 'Start',
       width: 110,
-      valueFormatter: ({ value }) => value?.slice(0, 10) ?? '—',
+      valueFormatter: (value) => value?.slice(0, 10) ?? '—',
     },
     {
       field: 'end_date',
       headerName: 'End',
       width: 110,
-      valueFormatter: ({ value }) => value?.slice(0, 10) ?? '—',
+      valueFormatter: (value) => value?.slice(0, 10) ?? '—',
     },
     {
       field: 'budget_planned',
       headerName: 'Budget',
       width: 120,
-      valueFormatter: ({ value }) =>
+      valueFormatter: (value) =>
         value != null ? `$${Number(value).toLocaleString()}` : '—',
     },
     {
@@ -307,7 +355,7 @@ function ProjectsPage() {
             <LinearProgress
               variant="determinate"
               value={Math.min(pct, 100)}
-              color={pct > 80 ? 'error' : 'primary'}
+              color={pct > 95 ? 'error' : pct >= 70 ? 'warning' : 'primary'}
               sx={{ flexGrow: 1, height: 8, borderRadius: 4 }}
             />
             <Typography variant="caption" sx={{ minWidth: 32 }}>
@@ -410,7 +458,7 @@ function ProjectsPage() {
         rowsPerPageOptions={[20, 50]}
         disableSelectionOnClick
         onRowClick={({ row }) => navigate(`/projects/${row.id}`)}
-        sx={{ bgcolor: 'white', cursor: 'pointer' }}
+        sx={{ bgcolor: 'background.paper', cursor: 'pointer' }}
       />
 
       <ProjectFormDialog
@@ -418,8 +466,11 @@ function ProjectsPage() {
         project={editing}
         allProjects={rows}
         onSave={handleSave}
-        onClose={() => { setFormOpen(false); setEditing(null); }}
+        onClose={() => { setFormOpen(false); setEditing(null); setSaveError(''); }}
         saving={saving}
+        saveError={saveError}
+        form={form}
+        setForm={setForm}
       />
 
       <ConfirmDialog

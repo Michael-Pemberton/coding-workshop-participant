@@ -67,7 +67,13 @@ export const deliverablesApi = crudFor('deliverables');
 
 export const assignmentsApi = crudFor('assignments');
 
-export const budgetsApi = crudFor('budgets');
+export const budgetsApi = {
+  ...crudFor('budgets'),
+  /** @param {string} projectId */
+  getStaff: (projectId) => client.get('/api/budgets/staff', { params: { project_id: projectId } }),
+  /** @param {object} body - {project_id, person_id, amount_planned, amount_consumed} */
+  upsertStaffOverride: (body) => client.put('/api/budgets/staff/override', body),
+};
 
 export const authApi = {
   /**

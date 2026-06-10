@@ -5,17 +5,12 @@ import logging
 import re
 
 from shared import (
-    get_db, resp, get_user, extract_id, rows_to_dicts, row_to_dict, init_db,
+    get_db, resp, get_user, extract_id, rows_to_dicts, row_to_dict,
     filter_fields,
 )
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
-
-try:
-    init_db()
-except Exception as exc:
-    logger.error("DB init failed: %s", exc)
 
 _EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
@@ -33,6 +28,13 @@ def _validate_person(body: dict) -> str | None:
                 return "weekly_hours_capacity must be between 1 and 168"
         except (TypeError, ValueError):
             return "weekly_hours_capacity must be an integer"
+    pay = body.get("hourly_pay")
+    if pay is not None:
+        try:
+            if float(pay) < 0:
+                return "hourly_pay must not be negative"
+        except (TypeError, ValueError):
+            return "hourly_pay must be a number"
     return None
 
 
@@ -228,7 +230,7 @@ def handler(event=None, context=None):
         return resp(405, {"error": "Method not allowed", "success": False})
     except Exception as exc:
         logger.error("Unhandled error: %s", exc, exc_info=True)
-        return resp(500, {"error": "Internal server error", "success": False})
+        return resp(500, {"error": f"{type(exc).__name__}: {exc}", "success": False})
 
 
 if __name__ == "__main__":

@@ -35,13 +35,24 @@ import {
 } from '../services/api.js';
 import { useAuth } from '../contexts/AuthContext.jsx';
 import HealthChip from '../components/HealthChip.jsx';
+import StaffBudgetSection from '../components/StaffBudgetSection.jsx';
 import StatusChip from '../components/StatusChip.jsx';
 import ConfirmDialog from '../components/ConfirmDialog.jsx';
 import LoadingOverlay from '../components/LoadingOverlay.jsx';
 import ErrorAlert from '../components/ErrorAlert.jsx';
+import { timeLeft } from '../utils/dueDate.js';
 
-const DELIVERABLE_STATUSES = ['pending', 'in_progress', 'completed', 'blocked', 'cancelled'];
-const BUDGET_CATEGORIES = ['labor', 'equipment', 'software', 'travel', 'other'];
+const BUDGET_CATEGORIES = ['staff', 'tooling', 'infrastructure', 'travel', 'other'];
+
+const EMPTY_ASSIGN = { person_id: '', role_on_project: '', hours_per_week: '' };
+const EMPTY_DELIV = { title: '', description: '', due_date: '', depends_on_id: '' };
+const EMPTY_BUDGET = { category: 'other', description: '', amount_planned: '', amount_consumed: '' };
+const draftKey = (kind, projectId) => `projectDetail:${kind}:newDraft:${projectId}`;
+const loadDraft = (key, fallback) => {
+  const raw = localStorage.getItem(key);
+  if (!raw) return fallback;
+  try { return { ...fallback, ...JSON.parse(raw) }; } catch { return fallback; }
+};
 
 /** Tab panel wrapper */
 function TabPanel({ children, value, index }) {
@@ -61,6 +72,7 @@ function ProjectDetailPage() {
   const navigate = useNavigate();
   const { canEdit, canDelete } = useAuth();
   const [project, setProject] = useState(null);
+  const [allProjects, setAllProjects] = useState([]);
   const [allPeople, setAllPeople] = useState([]);
   const [assignments, setAssignments] = useState([]);
   const [deliverables, setDeliverables] = useState([]);
@@ -72,28 +84,33 @@ function ProjectDetailPage() {
   // Dialog states
   const [assignDialog, setAssignDialog] = useState(false);
   const [assignEditing, setAssignEditing] = useState(null);
-  const [assignForm, setAssignForm] = useState({ person_id: '', role_on_project: '', hours_per_week: '' });
+  const [assignForm, setAssignForm] = useState(EMPTY_ASSIGN);
   const [delivDialog, setDelivDialog] = useState(false);
   const [delivEditing, setDelivEditing] = useState(null);
-  const [delivForm, setDelivForm] = useState({ title: '', description: '', status: 'pending', due_date: '', depends_on_id: '' });
+  const [delivForm, setDelivForm] = useState(EMPTY_DELIV);
+  const [delivDepProjectId, setDelivDepProjectId] = useState('');
+  const [delivDepOptions, setDelivDepOptions] = useState([]);
   const [budgetDialog, setBudgetDialog] = useState(false);
   const [budgetEditing, setBudgetEditing] = useState(null);
-  const [budgetForm, setBudgetForm] = useState({ category: 'other', description: '', amount_planned: '', amount_consumed: '' });
+  const [budgetForm, setBudgetForm] = useState(EMPTY_BUDGET);
   const [confirmDelete, setConfirmDelete] = useState(null);
   const [saving, setSaving] = useState(false);
+  const [formErrors, setFormErrors] = useState({});
 
   const fetchAll = useCallback(async () => {
     setLoading(true);
     setError('');
     try {
-      const [pj, pp, as, dl, bg] = await Promise.all([
+      const [pj, pjAll, pp, as, dl, bg] = await Promise.all([
         projectsApi.getById(id),
+        projectsApi.getAll(),
         peopleApi.getAll(),
         assignmentsApi.getAll({ project_id: id }),
         deliverablesApi.getAll({ project_id: id }),
         budgetsApi.getAll({ project_id: id }),
       ]);
       setProject(pj?.data ?? pj);
+      setAllProjects(pjAll?.data ?? pjAll ?? []);
       setAllPeople(pp?.data ?? pp ?? []);
       setAssignments(as?.data ?? as ?? []);
       setDeliverables(dl?.data ?? dl ?? []);
@@ -106,6 +123,27 @@ function ProjectDetailPage() {
   }, [id]);
 
   useEffect(() => { fetchAll(); }, [fetchAll]);
+
+  useEffect(() => {
+    if (assignDialog && !assignEditing) localStorage.setItem(draftKey('assign', id), JSON.stringify(assignForm));
+  }, [assignForm, assignDialog, assignEditing, id]);
+  useEffect(() => {
+    if (delivDialog && !delivEditing) localStorage.setItem(draftKey('deliv', id), JSON.stringify(delivForm));
+  }, [delivForm, delivDialog, delivEditing, id]);
+  useEffect(() => {
+    if (budgetDialog && !budgetEditing) localStorage.setItem(draftKey('budget', id), JSON.stringify(budgetForm));
+  }, [budgetForm, budgetDialog, budgetEditing, id]);
+
+  // Load deliverables for the chosen dependency project (may differ from current project).
+  useEffect(() => {
+    if (!delivDialog || !delivDepProjectId) { setDelivDepOptions([]); return; }
+    if (delivDepProjectId === id) { setDelivDepOptions(deliverables); return; }
+    let cancelled = false;
+    deliverablesApi.getAll({ project_id: delivDepProjectId })
+      .then((r) => { if (!cancelled) setDelivDepOptions(r?.data ?? r ?? []); })
+      .catch(() => { if (!cancelled) setDelivDepOptions([]); });
+    return () => { cancelled = true; };
+  }, [delivDialog, delivDepProjectId, id, deliverables]);
 
   if (loading) return <LoadingOverlay />;
   if (error) return <ErrorAlert message={error} onRetry={fetchAll} />;
@@ -124,10 +162,18 @@ function ProjectDetailPage() {
     setAssignEditing(a || null);
     setAssignForm(a
       ? { person_id: a.person_id, role_on_project: a.role_on_project ?? '', hours_per_week: a.hours_per_week ?? '' }
-      : { person_id: '', role_on_project: '', hours_per_week: '' });
+      : loadDraft(draftKey('assign', id), EMPTY_ASSIGN));
+    setFormErrors({});
     setAssignDialog(true);
   };
+  const clearAssignForm = () => {
+    setAssignForm(EMPTY_ASSIGN);
+    localStorage.removeItem(draftKey('assign', id));
+    setFormErrors({});
+  };
   const handleAssign = async () => {
+    if (!assignForm.person_id) { setFormErrors({ person_id: 'Missing required field' }); return; }
+    setFormErrors({});
     setSaving(true);
     try {
       if (assignEditing) {
@@ -137,10 +183,11 @@ function ProjectDetailPage() {
         });
       } else {
         await assignmentsApi.create({ ...assignForm, project_id: id });
+        localStorage.removeItem(draftKey('assign', id));
       }
       setAssignDialog(false);
       setAssignEditing(null);
-      setAssignForm({ person_id: '', role_on_project: '', hours_per_week: '' });
+      setAssignForm(EMPTY_ASSIGN);
       await fetchAll();
     } catch (err) { setError(err.message); }
     finally { setSaving(false); }
@@ -149,15 +196,35 @@ function ProjectDetailPage() {
   // --- Deliverables ---
   const openDelivDialog = (d) => {
     setDelivEditing(d || null);
-    setDelivForm(d ? { title: d.title, description: d.description || '', status: d.status, due_date: d.due_date?.slice(0, 10) || '', depends_on_id: d.depends_on_id || '' } : { title: '', description: '', status: 'pending', due_date: '', depends_on_id: '' });
+    setDelivForm(d
+      ? { title: d.title, description: d.description || '', due_date: d.due_date?.slice(0, 10) || '', depends_on_id: d.depends_on_id || '' }
+      : loadDraft(draftKey('deliv', id), EMPTY_DELIV));
+    setFormErrors({});
     setDelivDialog(true);
+    if (d?.depends_on_id) {
+      deliverablesApi.getById(d.depends_on_id)
+        .then((r) => setDelivDepProjectId((r?.data ?? r)?.project_id || id))
+        .catch(() => setDelivDepProjectId(id));
+    } else {
+      setDelivDepProjectId(id);
+    }
+  };
+  const clearDelivForm = () => {
+    setDelivForm(EMPTY_DELIV);
+    localStorage.removeItem(draftKey('deliv', id));
+    setFormErrors({});
   };
   const handleSaveDeliv = async () => {
+    if (!delivForm.title.trim()) { setFormErrors({ title: 'Missing required field' }); return; }
+    setFormErrors({});
     setSaving(true);
     try {
       const payload = { ...delivForm, project_id: id };
+      ['due_date', 'depends_on_id', 'description'].forEach((k) => {
+        if (payload[k] === '' || payload[k] == null) delete payload[k];
+      });
       if (delivEditing) await deliverablesApi.update(delivEditing.id, payload);
-      else await deliverablesApi.create(payload);
+      else { await deliverablesApi.create(payload); localStorage.removeItem(draftKey('deliv', id)); }
       setDelivDialog(false);
       await fetchAll();
     } catch (err) { setError(err.message); }
@@ -167,15 +234,28 @@ function ProjectDetailPage() {
   // --- Budgets ---
   const openBudgetDialog = (b) => {
     setBudgetEditing(b || null);
-    setBudgetForm(b ? { category: b.category, description: b.description || '', amount_planned: b.amount_planned, amount_consumed: b.amount_consumed } : { category: 'other', description: '', amount_planned: '', amount_consumed: '' });
+    setBudgetForm(b
+      ? { category: b.category, description: b.description || '', amount_planned: b.amount_planned, amount_consumed: b.amount_consumed }
+      : loadDraft(draftKey('budget', id), EMPTY_BUDGET));
+    setFormErrors({});
     setBudgetDialog(true);
   };
+  const clearBudgetForm = () => {
+    setBudgetForm(EMPTY_BUDGET);
+    localStorage.removeItem(draftKey('budget', id));
+    setFormErrors({});
+  };
   const handleSaveBudget = async () => {
+    if (!budgetForm.category) { setFormErrors({ category: 'Missing required field' }); return; }
+    setFormErrors({});
     setSaving(true);
     try {
       const payload = { ...budgetForm, project_id: id };
+      ['amount_planned', 'amount_consumed', 'description'].forEach((k) => {
+        if (payload[k] === '' || payload[k] == null) delete payload[k];
+      });
       if (budgetEditing) await budgetsApi.update(budgetEditing.id, payload);
-      else await budgetsApi.create(payload);
+      else { await budgetsApi.create(payload); localStorage.removeItem(draftKey('budget', id)); }
       setBudgetDialog(false);
       await fetchAll();
     } catch (err) { setError(err.message); }
@@ -197,6 +277,10 @@ function ProjectDetailPage() {
 
   const totalBudgetPlanned = budgets.reduce((s, b) => s + Number(b.amount_planned || 0), 0);
   const totalBudgetConsumed = budgets.reduce((s, b) => s + Number(b.amount_consumed || 0), 0);
+  const projectConsumed = Number(project.budget_consumed || 0);
+  const unallocatedConsumed = projectConsumed - totalBudgetConsumed;
+  const projectPlanned = Number(project.budget_planned || 0);
+  const unallocatedPlanned = projectPlanned - totalBudgetPlanned;
 
   return (
     <Box>
@@ -206,12 +290,24 @@ function ProjectDetailPage() {
           {project.title}
         </Typography>
         <StatusChip status={project.status} />
-        <HealthChip health={project.health} />
+        <HealthChip health={project.health} reason={project.health_reason} />
       </Box>
 
       {error && <ErrorAlert message={error} />}
 
-      <Tabs value={tab} onChange={(_, v) => setTab(v)} sx={{ mb: 1 }}>
+      <Tabs
+        value={tab}
+        onChange={(_, v) => setTab(v)}
+        sx={{
+          mb: 1,
+          '& .MuiTabs-indicator': { display: 'none' },
+          '& .MuiTab-root': { borderRadius: 1, mr: 0.5, minHeight: 40, color: 'rgba(255,255,255,0.7)' },
+          '& .MuiTab-root.Mui-selected': {
+            bgcolor: 'primary.main',
+            color: '#fff',
+          },
+        }}
+      >
         <Tab label="Overview" />
         <Tab label={`People (${assignments.length})`} />
         <Tab label={`Deliverables (${deliverables.length})`} />
@@ -231,7 +327,7 @@ function ProjectDetailPage() {
           <Box sx={{ mb: 2 }}>
             <Typography variant="caption" color="text.secondary">Budget Usage</Typography>
             <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
-              <LinearProgress variant="determinate" value={Math.min(budgetPct, 100)} color={budgetPct > 80 ? 'error' : 'primary'} sx={{ flexGrow: 1, height: 10, borderRadius: 5 }} />
+              <LinearProgress variant="determinate" value={Math.min(budgetPct, 100)} color={budgetPct > 95 ? 'error' : budgetPct >= 70 ? 'warning' : 'primary'} sx={{ flexGrow: 1, height: 10, borderRadius: 5 }} />
               <Typography variant="body2">{budgetPct}%</Typography>
             </Box>
           </Box>
@@ -251,7 +347,7 @@ function ProjectDetailPage() {
       {/* People / Assignments */}
       <TabPanel value={tab} index={1}>
         {canEdit() && (
-          <Button startIcon={<AddIcon />} variant="outlined" sx={{ mb: 2 }} onClick={() => openAssignDialog(null)}>
+          <Button startIcon={<AddIcon />} variant="contained" sx={{ mb: 2 }} onClick={() => openAssignDialog(null)}>
             Assign Person
           </Button>
         )}
@@ -281,21 +377,20 @@ function ProjectDetailPage() {
       {/* Deliverables */}
       <TabPanel value={tab} index={2}>
         {canEdit() && (
-          <Button startIcon={<AddIcon />} variant="outlined" sx={{ mb: 2 }} onClick={() => openDelivDialog(null)}>
+          <Button startIcon={<AddIcon />} variant="contained" sx={{ mb: 2 }} onClick={() => openDelivDialog(null)}>
             Add Deliverable
           </Button>
         )}
         <Table size="small" component={Paper}>
-          <TableHead><TableRow><TableCell>Title</TableCell><TableCell>Status</TableCell><TableCell>Due Date</TableCell><TableCell>Depends On</TableCell>{canEdit() && <TableCell />}</TableRow></TableHead>
+          <TableHead><TableRow><TableCell>Title</TableCell><TableCell>Status</TableCell><TableCell>Due Date</TableCell><TableCell>Time Left</TableCell><TableCell>Depends On</TableCell>{canEdit() && <TableCell />}</TableRow></TableHead>
           <TableBody>
-            {deliverables.map((d) => {
-              const dep = deliverables.find((x) => x.id === d.depends_on_id);
-              return (
+            {deliverables.map((d) => (
                 <TableRow key={d.id}>
                   <TableCell>{d.title}</TableCell>
-                  <TableCell><StatusChip status={d.status} type="deliverable" /></TableCell>
+                  <TableCell><HealthChip health={d.status} reason={d.health_reason} /></TableCell>
                   <TableCell>{d.due_date?.slice(0, 10) ?? '—'}</TableCell>
-                  <TableCell>{dep?.title ?? '—'}</TableCell>
+                  <TableCell>{timeLeft(d.due_date)}</TableCell>
+                  <TableCell>{d.depends_on_title ? `${d.depends_on_title}${d.depends_on_project_title ? ` (${d.depends_on_project_title})` : ''}` : '—'}</TableCell>
                   {canEdit() && (
                     <TableCell>
                       <IconButton size="small" onClick={() => openDelivDialog(d)}><EditIcon fontSize="small" /></IconButton>
@@ -303,16 +398,18 @@ function ProjectDetailPage() {
                     </TableCell>
                   )}
                 </TableRow>
-              );
-            })}
+            ))}
           </TableBody>
         </Table>
       </TabPanel>
 
       {/* Budget */}
       <TabPanel value={tab} index={3}>
+        <Box sx={{ mb: 2 }}>
+          <StaffBudgetSection projectId={id} defaultExpanded />
+        </Box>
         {canEdit() && (
-          <Button startIcon={<AddIcon />} variant="outlined" sx={{ mb: 2 }} onClick={() => openBudgetDialog(null)}>
+          <Button startIcon={<AddIcon />} variant="contained" sx={{ mb: 2 }} onClick={() => openBudgetDialog(null)}>
             Add Budget Item
           </Button>
         )}
@@ -339,52 +436,76 @@ function ProjectDetailPage() {
               <TableCell align="right"><strong>${totalBudgetConsumed.toLocaleString()}</strong></TableCell>
               {canEdit() && <TableCell />}
             </TableRow>
+            {(Math.abs(unallocatedPlanned) > 0.005 || Math.abs(unallocatedConsumed) > 0.005) && (
+              <TableRow>
+                <TableCell colSpan={2} sx={{ color: 'text.secondary', fontStyle: 'italic' }}>
+                  Unallocated (project total − items)
+                </TableCell>
+                <TableCell align="right" sx={{ color: unallocatedPlanned < 0 ? 'error.main' : 'text.secondary' }}>
+                  ${unallocatedPlanned.toLocaleString()}
+                </TableCell>
+                <TableCell align="right" sx={{ color: unallocatedConsumed < 0 ? 'error.main' : 'text.secondary' }}>
+                  ${unallocatedConsumed.toLocaleString()}
+                </TableCell>
+                {canEdit() && <TableCell />}
+              </TableRow>
+            )}
           </TableBody>
         </Table>
       </TabPanel>
 
       {/* Assign Person Dialog */}
-      <Dialog open={assignDialog} onClose={() => { setAssignDialog(false); setAssignEditing(null); }} maxWidth="xs" fullWidth>
+      <Dialog open={assignDialog} onClose={() => { setAssignDialog(false); setAssignEditing(null); setFormErrors({}); }} maxWidth="xs" fullWidth>
         <DialogTitle>{assignEditing ? 'Edit Assignment' : 'Assign Person'}</DialogTitle>
-        <DialogContent sx={{ display: 'flex', flexDirection: 'column', gap: 2, pt: 2 }}>
-          <TextField select label="Person *" value={assignForm.person_id} onChange={(e) => setAssignForm((f) => ({ ...f, person_id: e.target.value }))} fullWidth disabled={!!assignEditing}>
+        <DialogContent sx={{ display: 'flex', flexDirection: 'column', gap: 2, pt: 3 }}>
+          <TextField select label="Person *" value={assignForm.person_id} onChange={(e) => setAssignForm((f) => ({ ...f, person_id: e.target.value }))} error={!!formErrors.person_id} helperText={formErrors.person_id} fullWidth disabled={!!assignEditing}>
             {(assignEditing ? allPeople : unassignedPeople).map((p) => <MenuItem key={p.id} value={p.id}>{p.name}</MenuItem>)}
           </TextField>
           <TextField label="Role on Project" value={assignForm.role_on_project} onChange={(e) => setAssignForm((f) => ({ ...f, role_on_project: e.target.value }))} fullWidth />
           <TextField label="Hours/Week" type="number" value={assignForm.hours_per_week} onChange={(e) => setAssignForm((f) => ({ ...f, hours_per_week: e.target.value }))} fullWidth />
         </DialogContent>
         <DialogActions>
-          <Button onClick={() => { setAssignDialog(false); setAssignEditing(null); }}>Cancel</Button>
-          <Button onClick={handleAssign} variant="contained" disabled={!assignForm.person_id || saving}>{assignEditing ? 'Save' : 'Assign'}</Button>
+          {!assignEditing && <Button onClick={clearAssignForm} disabled={saving} color="inherit">Clear</Button>}
+          <Box sx={{ flexGrow: 1 }} />
+          <Button onClick={() => { setAssignDialog(false); setAssignEditing(null); setFormErrors({}); }}>Cancel</Button>
+          <Button onClick={handleAssign} variant="contained" disabled={saving}>{assignEditing ? 'Save' : 'Assign'}</Button>
         </DialogActions>
       </Dialog>
 
       {/* Deliverable Dialog */}
-      <Dialog open={delivDialog} onClose={() => setDelivDialog(false)} maxWidth="sm" fullWidth>
+      <Dialog open={delivDialog} onClose={() => { setDelivDialog(false); setFormErrors({}); }} maxWidth="sm" fullWidth>
         <DialogTitle>{delivEditing ? 'Edit Deliverable' : 'Add Deliverable'}</DialogTitle>
-        <DialogContent sx={{ display: 'flex', flexDirection: 'column', gap: 2, pt: 2 }}>
-          <TextField label="Title *" value={delivForm.title} onChange={(e) => setDelivForm((f) => ({ ...f, title: e.target.value }))} fullWidth />
+        <DialogContent sx={{ display: 'flex', flexDirection: 'column', gap: 2, pt: 3 }}>
+          <TextField label="Title *" value={delivForm.title} onChange={(e) => setDelivForm((f) => ({ ...f, title: e.target.value }))} error={!!formErrors.title} helperText={formErrors.title} fullWidth />
           <TextField label="Description" value={delivForm.description} onChange={(e) => setDelivForm((f) => ({ ...f, description: e.target.value }))} multiline rows={2} fullWidth />
-          <TextField select label="Status" value={delivForm.status} onChange={(e) => setDelivForm((f) => ({ ...f, status: e.target.value }))} fullWidth>
-            {DELIVERABLE_STATUSES.map((s) => <MenuItem key={s} value={s} sx={{ textTransform: 'capitalize' }}>{s.replace('_', ' ')}</MenuItem>)}
-          </TextField>
-          <TextField label="Due Date" type="date" value={delivForm.due_date} onChange={(e) => setDelivForm((f) => ({ ...f, due_date: e.target.value }))} fullWidth InputLabelProps={{ shrink: true }} />
-          <TextField select label="Depends On" value={delivForm.depends_on_id} onChange={(e) => setDelivForm((f) => ({ ...f, depends_on_id: e.target.value }))} fullWidth>
-            <MenuItem value="">None</MenuItem>
-            {deliverables.filter((d) => d.id !== delivEditing?.id).map((d) => <MenuItem key={d.id} value={d.id}>{d.title}</MenuItem>)}
-          </TextField>
+          <TextField label="Due Date" type="date" value={delivForm.due_date} onChange={(e) => setDelivForm((f) => ({ ...f, due_date: e.target.value }))} fullWidth InputLabelProps={{ shrink: true }} helperText="Status is computed: red = overdue, amber = ≤5 days, green = otherwise" />
+          <Box sx={{ display: 'flex', gap: 2 }}>
+            <TextField
+              select label="Dependency Project" value={delivDepProjectId}
+              onChange={(e) => { setDelivDepProjectId(e.target.value); setDelivForm((f) => ({ ...f, depends_on_id: '' })); }}
+              fullWidth
+            >
+              {allProjects.map((p) => <MenuItem key={p.id} value={p.id}>{p.title}</MenuItem>)}
+            </TextField>
+            <TextField select label="Depends On" value={delivForm.depends_on_id} onChange={(e) => setDelivForm((f) => ({ ...f, depends_on_id: e.target.value }))} fullWidth disabled={!delivDepProjectId}>
+              <MenuItem value="">None</MenuItem>
+              {delivDepOptions.filter((d) => d.id !== delivEditing?.id).map((d) => <MenuItem key={d.id} value={d.id}>{d.title}</MenuItem>)}
+            </TextField>
+          </Box>
         </DialogContent>
         <DialogActions>
-          <Button onClick={() => setDelivDialog(false)}>Cancel</Button>
-          <Button onClick={handleSaveDeliv} variant="contained" disabled={!delivForm.title || saving}>Save</Button>
+          {!delivEditing && <Button onClick={clearDelivForm} disabled={saving} color="inherit">Clear</Button>}
+          <Box sx={{ flexGrow: 1 }} />
+          <Button onClick={() => { setDelivDialog(false); setFormErrors({}); }}>Cancel</Button>
+          <Button onClick={handleSaveDeliv} variant="contained" disabled={saving}>Save</Button>
         </DialogActions>
       </Dialog>
 
       {/* Budget Dialog */}
-      <Dialog open={budgetDialog} onClose={() => setBudgetDialog(false)} maxWidth="xs" fullWidth>
+      <Dialog open={budgetDialog} onClose={() => { setBudgetDialog(false); setFormErrors({}); }} maxWidth="xs" fullWidth>
         <DialogTitle>{budgetEditing ? 'Edit Budget Item' : 'Add Budget Item'}</DialogTitle>
-        <DialogContent sx={{ display: 'flex', flexDirection: 'column', gap: 2, pt: 2 }}>
-          <TextField select label="Category" value={budgetForm.category} onChange={(e) => setBudgetForm((f) => ({ ...f, category: e.target.value }))} fullWidth>
+        <DialogContent sx={{ display: 'flex', flexDirection: 'column', gap: 2, pt: 3 }}>
+          <TextField select label="Category *" value={budgetForm.category} onChange={(e) => setBudgetForm((f) => ({ ...f, category: e.target.value }))} error={!!formErrors.category} helperText={formErrors.category} fullWidth sx={{ mt: 1 }}>
             {BUDGET_CATEGORIES.map((c) => <MenuItem key={c} value={c} sx={{ textTransform: 'capitalize' }}>{c}</MenuItem>)}
           </TextField>
           <TextField label="Description" value={budgetForm.description} onChange={(e) => setBudgetForm((f) => ({ ...f, description: e.target.value }))} fullWidth />
@@ -392,7 +513,9 @@ function ProjectDetailPage() {
           <TextField label="Amount Consumed" type="number" value={budgetForm.amount_consumed} onChange={(e) => setBudgetForm((f) => ({ ...f, amount_consumed: e.target.value }))} fullWidth />
         </DialogContent>
         <DialogActions>
-          <Button onClick={() => setBudgetDialog(false)}>Cancel</Button>
+          {!budgetEditing && <Button onClick={clearBudgetForm} disabled={saving} color="inherit">Clear</Button>}
+          <Box sx={{ flexGrow: 1 }} />
+          <Button onClick={() => { setBudgetDialog(false); setFormErrors({}); }}>Cancel</Button>
           <Button onClick={handleSaveBudget} variant="contained" disabled={saving}>Save</Button>
         </DialogActions>
       </Dialog>

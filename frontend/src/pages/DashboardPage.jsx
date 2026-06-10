@@ -104,6 +104,11 @@ function DashboardPage() {
     (p) => (allocationByPerson[p.id] || 0) > (p.weekly_hours_capacity || 40),
   );
 
+  const overBudget = projects.filter(
+    (p) => Number(p.budget_planned || 0) > 0
+      && Number(p.budget_consumed || 0) > Number(p.budget_planned || 0),
+  );
+
   const recentProjects = [...projects]
     .sort((a, b) => new Date(b.created_at) - new Date(a.created_at))
     .slice(0, 5);
@@ -132,7 +137,7 @@ function DashboardPage() {
 
       <Grid container spacing={3}>
         {/* RAG Summary */}
-        <Grid item xs={12} md={4}>
+        <Grid item xs={12} md={3}>
           <Card>
             <CardContent>
               <Typography variant="h6" gutterBottom>
@@ -148,7 +153,7 @@ function DashboardPage() {
         </Grid>
 
         {/* Overallocated People */}
-        <Grid item xs={12} md={8}>
+        <Grid item xs={12} md={4}>
           <Card>
             <CardContent>
               <Typography variant="h6" gutterBottom>
@@ -160,14 +165,46 @@ function DashboardPage() {
                 overallocated.map((p) => (
                   <Box
                     key={p.id}
-                    sx={{ display: 'flex', justifyContent: 'space-between', mb: 1 }}
+                    sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', gap: 1, mb: 0.5 }}
                   >
-                    <Typography>{p.name}</Typography>
-                    <Typography color="error">
+                    <Typography sx={{ fontWeight: 500 }}>{p.name}</Typography>
+                    <Typography variant="body2" color="error.main">
                       {allocationByPerson[p.id]}h / {p.weekly_hours_capacity}h per week
                     </Typography>
                   </Box>
                 ))
+              )}
+            </CardContent>
+          </Card>
+        </Grid>
+
+        {/* Over Budget Projects */}
+        <Grid item xs={12} md={5}>
+          <Card>
+            <CardContent>
+              <Typography variant="h6" gutterBottom>
+                Over Budget Projects
+              </Typography>
+              {overBudget.length === 0 ? (
+                <Typography color="text.secondary">No projects over budget.</Typography>
+              ) : (
+                overBudget.map((p) => {
+                  const planned = Number(p.budget_planned || 0);
+                  const consumed = Number(p.budget_consumed || 0);
+                  const pct = Math.round((consumed / planned) * 100);
+                  return (
+                    <Box
+                      key={p.id}
+                      sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', gap: 1, mb: 0.5, cursor: 'pointer' }}
+                      onClick={() => navigate(`/projects/${p.id}`)}
+                    >
+                      <Typography sx={{ fontWeight: 500 }}>{p.title}</Typography>
+                      <Typography variant="body2" color="error.main">
+                        ${consumed.toLocaleString()} / ${planned.toLocaleString()} ({pct}%)
+                      </Typography>
+                    </Box>
+                  );
+                })
               )}
             </CardContent>
           </Card>
@@ -208,14 +245,14 @@ function DashboardPage() {
                         <StatusChip status={p.status} />
                       </TableCell>
                       <TableCell>
-                        <HealthChip health={p.health} />
+                        <HealthChip health={p.health} reason={p.health_reason} />
                       </TableCell>
                       <TableCell>
                         <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
                           <LinearProgress
                             variant="determinate"
                             value={Math.min(pct, 100)}
-                            color={pct > 80 ? 'error' : 'primary'}
+                            color={pct > 95 ? 'error' : pct >= 70 ? 'warning' : 'primary'}
                             sx={{ flexGrow: 1, height: 8, borderRadius: 4 }}
                           />
                           <Typography variant="caption">{pct}%</Typography>

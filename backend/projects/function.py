@@ -5,19 +5,22 @@ import logging
 
 from shared import (
     get_db, resp, get_user, extract_id, rows_to_dicts, row_to_dict,
-    init_db, calculate_health, filter_fields,
+    calculate_health, filter_fields,
     VALID_STATUSES, VALID_HEALTH,
 )
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
-try:
-    init_db()
-except Exception as exc:
-    logger.error("DB init failed: %s", exc)
-
 _VALID_PROJECT_STATUSES = VALID_STATUSES.get("projects", set())
+
+
+def _with_health(row: dict) -> dict:
+    """Recomputes health + injects health_reason so display reflects current rules."""
+    color, reason = calculate_health(row)
+    row["health"] = color
+    row["health_reason"] = reason
+    return row
 
 
 def _validate_project(body: dict) -> str | None:
@@ -76,7 +79,7 @@ def list_projects(event: dict) -> dict:
             f"SELECT * FROM projects WHERE {' AND '.join(conditions)} ORDER BY created_at DESC LIMIT %s OFFSET %s",
             vals + [limit, offset],
         )
-        return resp(200, {"data": rows_to_dicts(cur), "success": True})
+        return resp(200, {"data": [_with_health(r) for r in rows_to_dicts(cur)], "success": True})
 
 
 def get_project(project_id: str) -> dict:
@@ -87,7 +90,7 @@ def get_project(project_id: str) -> dict:
         row = cur.fetchone()
         if not row:
             return resp(404, {"error": "Project not found", "success": False})
-        return resp(200, {"data": row_to_dict(cur, row), "success": True})
+        return resp(200, {"data": _with_health(row_to_dict(cur, row)), "success": True})
 
 
 def create_project(event: dict, user: dict) -> dict:
@@ -104,7 +107,7 @@ def create_project(event: dict, user: dict) -> dict:
     err = _validate_project(body)
     if err:
         return resp(400, {"error": err, "success": False})
-    body["health"] = calculate_health(body)
+    body["health"], _ = calculate_health(body)
     body["created_by"] = user.get("sub")
     cols = list(body.keys())
     vals = list(body.values())
@@ -116,7 +119,7 @@ def create_project(event: dict, user: dict) -> dict:
         )
         row = cur.fetchone()
         conn.commit()
-        return resp(201, {"data": row_to_dict(cur, row), "success": True})
+        return resp(201, {"data": _with_health(row_to_dict(cur, row)), "success": True})
 
 
 def update_project(event: dict, project_id: str, user: dict) -> dict:
@@ -141,7 +144,7 @@ def update_project(event: dict, project_id: str, user: dict) -> dict:
             return resp(404, {"error": "Project not found", "success": False})
         existing = row_to_dict(cur, existing_row)
     merged = {**existing, **body}
-    body["health"] = calculate_health(merged)
+    body["health"], _ = calculate_health(merged)
     set_clause = ", ".join([f"{k} = %s" for k in body.keys()])
     vals = list(body.values()) + [project_id]
     with conn.cursor() as cur:
@@ -153,7 +156,7 @@ def update_project(event: dict, project_id: str, user: dict) -> dict:
         conn.commit()
         if not row:
             return resp(404, {"error": "Project not found", "success": False})
-        return resp(200, {"data": row_to_dict(cur, row), "success": True})
+        return resp(200, {"data": _with_health(row_to_dict(cur, row)), "success": True})
 
 
 def delete_project(project_id: str, user: dict) -> dict:
@@ -202,7 +205,7 @@ def handler(event=None, context=None):
         return resp(405, {"error": "Method not allowed", "success": False})
     except Exception as exc:
         logger.error("Unhandled error: %s", exc, exc_info=True)
-        return resp(500, {"error": "Internal server error", "success": False})
+        return resp(500, {"error": f"{type(exc).__name__}: {exc}", "success": False})
 
 
 if __name__ == "__main__":

@@ -9,7 +9,7 @@ import jwt
 import requests
 
 from shared import (
-    get_db, resp, extract_id, rows_to_dicts, row_to_dict, init_db, IS_LOCAL, JWT_SECRET,
+    get_db, resp, extract_id, rows_to_dicts, row_to_dict, IS_LOCAL, JWT_SECRET,
     hash_password, verify_password,
 )
 
@@ -23,11 +23,6 @@ GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID", "")
 _failed_attempts: dict = {}
 _MAX_ATTEMPTS = 10
 _LOCKOUT_SECONDS = 300  # 5 minutes
-
-try:
-    init_db()
-except Exception as exc:
-    logger.error("DB init failed: %s", exc)
 
 
 def _check_rate_limit(username: str) -> bool:
@@ -375,7 +370,7 @@ def handler(event=None, context=None):
         return resp(404, {"error": "Not found", "success": False})
     except Exception as exc:
         logger.error("Error: %s", exc, exc_info=True)
-        return resp(500, {"error": "Internal server error", "success": False})
+        return resp(500, {"error": f"{type(exc).__name__}: {exc}", "success": False})
 
 
 if __name__ == "__main__":

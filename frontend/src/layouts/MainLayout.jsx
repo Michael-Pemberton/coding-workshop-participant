@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { Outlet, NavLink, useNavigate } from 'react-router-dom';
 import PropTypes from 'prop-types';
 import AppBar from '@mui/material/AppBar';
@@ -23,12 +23,16 @@ import ChecklistIcon from '@mui/icons-material/Checklist';
 import AccountBalanceWalletIcon from '@mui/icons-material/AccountBalanceWallet';
 import AdminPanelSettingsIcon from '@mui/icons-material/AdminPanelSettings';
 import LogoutIcon from '@mui/icons-material/Logout';
+import Brightness4Icon from '@mui/icons-material/Brightness4';
+import Brightness7Icon from '@mui/icons-material/Brightness7';
 import useMediaQuery from '@mui/material/useMediaQuery';
 import { useTheme } from '@mui/material/styles';
 
 import { useAuth } from '../contexts/AuthContext.jsx';
+import { useColorMode } from '../contexts/ColorModeContext.jsx';
 
 const DRAWER_WIDTH = 220;
+const DRAWER_PREF_KEY = 'layout:drawerOpen';
 
 const NAV_ITEMS = [
   { label: 'Dashboard', to: '/', icon: <DashboardIcon /> },
@@ -44,9 +48,6 @@ const ADMIN_NAV_ITEMS = [
 
 /**
  * Sidebar navigation drawer content.
- * @param {object} props
- * @param {function} props.onClose
- * @param {boolean} props.showAdmin - When true, append admin nav items.
  */
 function DrawerContent({ onClose, showAdmin }) {
   const items = showAdmin ? [...NAV_ITEMS, ...ADMIN_NAV_ITEMS] : NAV_ITEMS;
@@ -66,7 +67,7 @@ function DrawerContent({ onClose, showAdmin }) {
               end={to === '/'}
               onClick={onClose}
               sx={{
-                '&.active': { bgcolor: 'primary.light', color: 'primary.contrastText' },
+                '&.active': { bgcolor: 'primary.main', color: 'primary.contrastText' },
                 '&.active .MuiListItemIcon-root': { color: 'primary.contrastText' },
               }}
             >
@@ -90,35 +91,54 @@ DrawerContent.defaultProps = {
 };
 
 /**
- * Main application layout with AppBar and responsive sidebar.
+ * Main application layout with AppBar and an always-toggleable sidebar.
  */
 function MainLayout() {
   const { user, logout, isAdmin } = useAuth();
+  const { mode, toggle: toggleColorMode } = useColorMode();
   const navigate = useNavigate();
   const theme = useTheme();
   const isMobile = useMediaQuery(theme.breakpoints.down('md'));
-  const [drawerOpen, setDrawerOpen] = useState(false);
+  const [drawerOpen, setDrawerOpen] = useState(() => {
+    const saved = localStorage.getItem(DRAWER_PREF_KEY);
+    return saved == null ? true : saved === 'true';
+  });
   const showAdmin = isAdmin();
+
+  // Auto-close on shrinking to mobile; reopen on growing back to desktop
+  // if the user hadn't explicitly closed it.
+  useEffect(() => {
+    if (isMobile) setDrawerOpen(false);
+  }, [isMobile]);
+
+  const toggleDrawer = () => {
+    setDrawerOpen((prev) => {
+      const next = !prev;
+      if (!isMobile) localStorage.setItem(DRAWER_PREF_KEY, String(next));
+      return next;
+    });
+  };
 
   const handleLogout = () => {
     logout();
     navigate('/login');
   };
 
+  const persistentOpen = !isMobile && drawerOpen;
+
   return (
     <Box sx={{ display: 'flex' }}>
       <AppBar position="fixed" sx={{ zIndex: (t) => t.zIndex.drawer + 1 }}>
         <Toolbar>
-          {isMobile && (
-            <IconButton
-              color="inherit"
-              edge="start"
-              sx={{ mr: 1 }}
-              onClick={() => setDrawerOpen(true)}
-            >
-              <MenuIcon />
-            </IconButton>
-          )}
+          <IconButton
+            color="inherit"
+            edge="start"
+            sx={{ mr: 1 }}
+            onClick={toggleDrawer}
+            aria-label="toggle navigation"
+          >
+            <MenuIcon />
+          </IconButton>
           <Typography variant="h6" sx={{ flexGrow: 1 }}>
             ACME Project Tracker
           </Typography>
@@ -135,6 +155,11 @@ function MainLayout() {
                   {user.name?.[0]?.toUpperCase()}
                 </Avatar>
               </Tooltip>
+              <Tooltip title={mode === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'}>
+                <IconButton color="inherit" onClick={toggleColorMode} size="small">
+                  {mode === 'dark' ? <Brightness7Icon /> : <Brightness4Icon />}
+                </IconButton>
+              </Tooltip>
               <Tooltip title="Logout">
                 <IconButton color="inherit" onClick={handleLogout} size="small">
                   <LogoutIcon />
@@ -145,12 +170,12 @@ function MainLayout() {
         </Toolbar>
       </AppBar>
 
-      {/* Permanent drawer on desktop */}
+      {/* Persistent drawer on desktop — toggleable */}
       {!isMobile && (
         <Drawer
-          variant="permanent"
+          variant="persistent"
+          open={drawerOpen}
           sx={{
-            width: DRAWER_WIDTH,
             '& .MuiDrawer-paper': { width: DRAWER_WIDTH, boxSizing: 'border-box' },
           }}
         >
@@ -173,11 +198,16 @@ function MainLayout() {
         component="main"
         sx={{
           flexGrow: 1,
+          minWidth: 0,
           p: 3,
           mt: 8,
-          ml: isMobile ? 0 : `${DRAWER_WIDTH}px`,
+          ml: persistentOpen ? `${DRAWER_WIDTH}px` : 0,
+          transition: (t) => t.transitions.create('margin-left', {
+            easing: t.transitions.easing.sharp,
+            duration: t.transitions.duration.leavingScreen,
+          }),
           minHeight: '100vh',
-          bgcolor: 'grey.50',
+          bgcolor: 'background.default',
         }}
       >
         <Outlet />

@@ -23,14 +23,30 @@ import { budgetsApi, projectsApi } from '../services/api.js';
 import { useAuth } from '../contexts/AuthContext.jsx';
 import ConfirmDialog from '../components/ConfirmDialog.jsx';
 import ErrorAlert from '../components/ErrorAlert.jsx';
+import StaffBudgetSection from '../components/StaffBudgetSection.jsx';
+import { useColorMode } from '../contexts/ColorModeContext.jsx';
 
-const CATEGORIES = ['labor', 'equipment', 'software', 'travel', 'other'];
+const CATEGORIES = ['staff', 'tooling', 'infrastructure', 'travel', 'other'];
 const EMPTY_FORM = { category: 'other', description: '', amount_planned: '', amount_consumed: '' };
+const DRAFT_KEY = 'budgets:newDraft';
+
+function parseMoney(input) {
+  const cleaned = String(input).replace(/[^\d.]/g, '');
+  const parts = cleaned.split('.');
+  return parts.length > 1 ? `${parts[0]}.${parts.slice(1).join('')}` : parts[0];
+}
+
+function formatMoney(value) {
+  if (value === '' || value == null) return '';
+  const [int, dec] = String(value).split('.');
+  const withCommas = Number(int || 0).toLocaleString('en-US');
+  return dec !== undefined ? `${withCommas}.${dec}` : withCommas;
+}
 
 /**
  * Budget item create/edit dialog.
  */
-function BudgetFormDialog({ open, item, projectId, onSave, onClose, saving }) {
+function BudgetFormDialog({ open, item, projectId, onSave, onClose, saving, saveError }) {
   const [form, setForm] = useState(EMPTY_FORM);
   const [errors, setErrors] = useState({});
 
@@ -42,14 +58,28 @@ function BudgetFormDialog({ open, item, projectId, onSave, onClose, saving }) {
         amount_planned: item.amount_planned ?? '',
         amount_consumed: item.amount_consumed ?? '',
       });
+    } else if (open) {
+      const saved = localStorage.getItem(DRAFT_KEY);
+      if (saved) { try { setForm({ ...EMPTY_FORM, ...JSON.parse(saved) }); } catch { setForm(EMPTY_FORM); } }
+      else setForm(EMPTY_FORM);
     } else {
       setForm(EMPTY_FORM);
     }
     setErrors({});
   }, [item, open]);
 
+  useEffect(() => {
+    if (open && !item) localStorage.setItem(DRAFT_KEY, JSON.stringify(form));
+  }, [form, open, item]);
+
+  const handleClear = () => {
+    setForm(EMPTY_FORM);
+    localStorage.removeItem(DRAFT_KEY);
+    setErrors({});
+  };
+
   const handleSubmit = () => {
-    if (!form.category) { setErrors({ category: 'Category is required' }); return; }
+    if (!form.category) { setErrors({ category: 'Missing required field' }); return; }
     onSave({ ...form, project_id: projectId });
   };
 
@@ -58,29 +88,36 @@ function BudgetFormDialog({ open, item, projectId, onSave, onClose, saving }) {
   return (
     <Dialog open={open} onClose={onClose} maxWidth="xs" fullWidth>
       <DialogTitle>{item ? 'Edit Budget Item' : 'New Budget Item'}</DialogTitle>
-      <DialogContent sx={{ display: 'flex', flexDirection: 'column', gap: 2, pt: 2 }}>
-        <TextField select label="Category *" value={form.category} onChange={set('category')} error={!!errors.category} helperText={errors.category} fullWidth>
+      <DialogContent sx={{ display: 'flex', flexDirection: 'column', gap: 2, pt: 3 }}>
+        {saveError && (
+          <Box sx={{ bgcolor: 'error.light', color: 'error.contrastText', p: 1.5, borderRadius: 1, fontSize: 14 }}>
+            {saveError}
+          </Box>
+        )}
+        <TextField select label="Category *" value={form.category} onChange={set('category')} error={!!errors.category} helperText={errors.category} fullWidth sx={{ mt: 1 }}>
           {CATEGORIES.map((c) => <MenuItem key={c} value={c} sx={{ textTransform: 'capitalize' }}>{c}</MenuItem>)}
         </TextField>
         <TextField label="Description" value={form.description} onChange={set('description')} multiline rows={2} fullWidth />
         <TextField
           label="Amount Planned"
-          type="number"
-          value={form.amount_planned}
-          onChange={set('amount_planned')}
+          value={formatMoney(form.amount_planned)}
+          onChange={(e) => setForm((f) => ({ ...f, amount_planned: parseMoney(e.target.value) }))}
           fullWidth
+          inputProps={{ inputMode: 'decimal' }}
           InputProps={{ startAdornment: <InputAdornment position="start">$</InputAdornment> }}
         />
         <TextField
           label="Amount Consumed"
-          type="number"
-          value={form.amount_consumed}
-          onChange={set('amount_consumed')}
+          value={formatMoney(form.amount_consumed)}
+          onChange={(e) => setForm((f) => ({ ...f, amount_consumed: parseMoney(e.target.value) }))}
           fullWidth
+          inputProps={{ inputMode: 'decimal' }}
           InputProps={{ startAdornment: <InputAdornment position="start">$</InputAdornment> }}
         />
       </DialogContent>
       <DialogActions>
+        {!item && <Button onClick={handleClear} disabled={saving} color="inherit">Clear</Button>}
+        <Box sx={{ flexGrow: 1 }} />
         <Button onClick={onClose} disabled={saving}>Cancel</Button>
         <Button onClick={handleSubmit} variant="contained" disabled={saving}>{saving ? 'Saving…' : 'Save'}</Button>
       </DialogActions>
@@ -95,17 +132,20 @@ BudgetFormDialog.propTypes = {
   onSave: PropTypes.func.isRequired,
   onClose: PropTypes.func.isRequired,
   saving: PropTypes.bool.isRequired,
+  saveError: PropTypes.string,
 };
-BudgetFormDialog.defaultProps = { item: null, projectId: null };
+BudgetFormDialog.defaultProps = { item: null, projectId: null, saveError: '' };
 
 /**
  * Budgets page — per-project budget item tracking with planned vs consumed.
  */
 function BudgetsPage() {
   const { canEdit, canDelete } = useAuth();
+  const { mode } = useColorMode();
+  const isDark = mode === 'dark';
   const [rows, setRows] = useState([]);
   const [projects, setProjects] = useState([]);
-  const [selectedProject, setSelectedProject] = useState('');
+  const [selectedProject, setSelectedProject] = useState(() => localStorage.getItem('budgets:selectedProject') || '');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [formOpen, setFormOpen] = useState(false);
@@ -113,6 +153,7 @@ function BudgetsPage() {
   const [saving, setSaving] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState(null);
   const [deleting, setDeleting] = useState(false);
+  const [saveError, setSaveError] = useState('');
 
   const fetchProjects = useCallback(async () => {
     try {
@@ -142,14 +183,19 @@ function BudgetsPage() {
 
   const handleSave = async (form) => {
     setSaving(true);
+    setSaveError('');
     try {
-      if (editing) await budgetsApi.update(editing.id, form);
-      else await budgetsApi.create(form);
+      const payload = { ...form };
+      ['amount_planned', 'amount_consumed', 'description'].forEach((k) => {
+        if (payload[k] === '' || payload[k] == null) delete payload[k];
+      });
+      if (editing) await budgetsApi.update(editing.id, payload);
+      else { await budgetsApi.create(payload); localStorage.removeItem(DRAFT_KEY); }
       setFormOpen(false);
       setEditing(null);
       await fetchBudgets();
     } catch (err) {
-      setError(err.message);
+      setSaveError(err.message);
     } finally {
       setSaving(false);
     }
@@ -174,8 +220,8 @@ function BudgetsPage() {
   const columns = [
     { field: 'category', headerName: 'Category', width: 120, renderCell: ({ value }) => <span style={{ textTransform: 'capitalize' }}>{value}</span> },
     { field: 'description', headerName: 'Description', flex: 1 },
-    { field: 'amount_planned', headerName: 'Planned', width: 120, valueFormatter: ({ value }) => `$${Number(value || 0).toLocaleString()}` },
-    { field: 'amount_consumed', headerName: 'Consumed', width: 120, valueFormatter: ({ value }) => `$${Number(value || 0).toLocaleString()}` },
+    { field: 'amount_planned', headerName: 'Planned', width: 120, valueFormatter: (value) => `$${Number(value || 0).toLocaleString()}` },
+    { field: 'amount_consumed', headerName: 'Consumed', width: 120, valueFormatter: (value) => `$${Number(value || 0).toLocaleString()}` },
     {
       field: 'pct',
       headerName: '% Used',
@@ -189,7 +235,7 @@ function BudgetsPage() {
             <LinearProgress
               variant="determinate"
               value={Math.min(pct, 100)}
-              color={pct > 100 ? 'error' : pct > 80 ? 'warning' : 'primary'}
+              color={pct > 95 ? 'error' : pct >= 70 ? 'warning' : 'primary'}
               sx={{ flexGrow: 1, height: 8, borderRadius: 4 }}
             />
             <Typography variant="caption">{pct}%</Typography>
@@ -225,7 +271,7 @@ function BudgetsPage() {
           size="small"
           label="Project"
           value={selectedProject}
-          onChange={(e) => setSelectedProject(e.target.value)}
+          onChange={(e) => { setSelectedProject(e.target.value); localStorage.setItem('budgets:selectedProject', e.target.value); }}
           sx={{ minWidth: 280 }}
         >
           <MenuItem value="">Select a project…</MenuItem>
@@ -234,25 +280,31 @@ function BudgetsPage() {
       </Box>
 
       {selectedProject && rows.length > 0 && (
-        <Box sx={{ display: 'flex', gap: 4, mb: 2, p: 2, bgcolor: 'grey.100', borderRadius: 1 }}>
+        <Box sx={{ display: 'flex', gap: 4, mb: 2, p: 2, bgcolor: isDark ? '#1e1e22' : 'action.hover', color: isDark ? '#fff' : 'inherit', borderRadius: 1 }}>
           <Box>
-            <Typography variant="caption" color="text.secondary">Total Planned</Typography>
-            <Typography fontWeight="bold">${totalPlanned.toLocaleString()}</Typography>
+            <Typography variant="caption" sx={{ color: isDark ? 'rgba(255,255,255,0.7)' : 'text.secondary' }}>Total Planned</Typography>
+            <Typography fontWeight="bold" sx={{ color: isDark ? '#fff' : 'text.primary' }}>${totalPlanned.toLocaleString()}</Typography>
           </Box>
           <Box>
-            <Typography variant="caption" color="text.secondary">Total Consumed</Typography>
-            <Typography fontWeight="bold" color={totalConsumed > totalPlanned ? 'error.main' : 'text.primary'}>
+            <Typography variant="caption" sx={{ color: isDark ? 'rgba(255,255,255,0.7)' : 'text.secondary' }}>Total Consumed</Typography>
+            <Typography fontWeight="bold" sx={{ color: totalConsumed > totalPlanned ? 'error.main' : (isDark ? '#fff' : 'text.primary') }}>
               ${totalConsumed.toLocaleString()}
             </Typography>
           </Box>
           <Box>
-            <Typography variant="caption" color="text.secondary">Variance</Typography>
-            <Typography fontWeight="bold">${(totalPlanned - totalConsumed).toLocaleString()}</Typography>
+            <Typography variant="caption" sx={{ color: isDark ? 'rgba(255,255,255,0.7)' : 'text.secondary' }}>Variance</Typography>
+            <Typography fontWeight="bold" sx={{ color: isDark ? '#fff' : 'text.primary' }}>${(totalPlanned - totalConsumed).toLocaleString()}</Typography>
           </Box>
         </Box>
       )}
 
       {error && <ErrorAlert message={error} onRetry={fetchBudgets} />}
+
+      {selectedProject && (
+        <Box sx={{ mb: 2 }}>
+          <StaffBudgetSection projectId={selectedProject} />
+        </Box>
+      )}
 
       {!selectedProject ? (
         <Typography color="text.secondary">Select a project to view its budget.</Typography>
@@ -265,7 +317,7 @@ function BudgetsPage() {
           pageSize={20}
           rowsPerPageOptions={[20, 50]}
           disableSelectionOnClick
-          sx={{ bgcolor: 'white' }}
+          sx={{ bgcolor: 'background.paper' }}
         />
       )}
 
@@ -274,8 +326,9 @@ function BudgetsPage() {
         item={editing}
         projectId={selectedProject}
         onSave={handleSave}
-        onClose={() => { setFormOpen(false); setEditing(null); }}
+        onClose={() => { setFormOpen(false); setEditing(null); setSaveError(''); }}
         saving={saving}
+        saveError={saveError}
       />
 
       <ConfirmDialog
