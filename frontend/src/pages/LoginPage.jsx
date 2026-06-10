@@ -8,15 +8,11 @@ import Button from '@mui/material/Button';
 import TextField from '@mui/material/TextField';
 import Alert from '@mui/material/Alert';
 import Divider from '@mui/material/Divider';
-import { GoogleLogin } from '@react-oauth/google';
 
 import { useAuth } from '../contexts/AuthContext.jsx';
 
-/**
- * Login page with Google OAuth and username/password sign-in.
- */
 function LoginPage() {
-  const { login, loginWithPassword, isAuthenticated } = useAuth();
+  const { loginWithPassword, isAuthenticated } = useAuth();
   const navigate = useNavigate();
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
@@ -27,19 +23,6 @@ function LoginPage() {
     navigate('/', { replace: true });
     return null;
   }
-
-  const handleGoogleSuccess = async ({ credential }) => {
-    setError('');
-    setLoading(true);
-    try {
-      await login(credential);
-      navigate('/');
-    } catch (err) {
-      setError(err.message || 'Login failed');
-    } finally {
-      setLoading(false);
-    }
-  };
 
   const handlePasswordLogin = async (e) => {
     e.preventDefault();
@@ -80,20 +63,6 @@ function LoginPage() {
               {error}
             </Alert>
           )}
-
-          <Box sx={{ display: 'flex', justifyContent: 'center', mb: 2 }}>
-            <GoogleLogin
-              onSuccess={handleGoogleSuccess}
-              onError={() => setError('Google sign-in failed')}
-              disabled={loading}
-            />
-          </Box>
-
-          <Divider sx={{ my: 2 }}>
-            <Typography variant="caption" color="text.secondary">
-              OR
-            </Typography>
-          </Divider>
 
           <Box
             component="form"
