@@ -8,7 +8,7 @@ import jwt
 
 from shared import (
     get_db, resp, extract_id, rows_to_dicts, row_to_dict, IS_LOCAL, JWT_SECRET,
-    hash_password, verify_password, init_db,
+    hash_password, verify_password, init_db, backfill_user_person_links,
 )
 
 logger = logging.getLogger()
@@ -136,8 +136,17 @@ def create_user(body: dict) -> dict:
             (username, name, email, hash_password(password), role),
         )
         row = cur.fetchone()
-        conn.commit()
         user = row_to_dict(cur, row)
+        cur.execute(
+            """
+            INSERT INTO people (name, email, is_active)
+            VALUES (%s, %s, TRUE)
+            ON CONFLICT (email) DO UPDATE
+            SET is_deleted = FALSE, updated_at = NOW()
+            """,
+            (name, email),
+        )
+        conn.commit()
         user.pop("password_hash", None)
         return resp(201, {"data": user, "success": True})
 
@@ -230,6 +239,7 @@ def handler(event=None, context=None):
                 )
                 conn.commit()
                 seeded = True
+        backfill_user_person_links()
         return {"ok": True, "seeded_admin": seeded, "user_count": count + (1 if seeded else 0)}
 
     method = (event.get("requestContext") or {}).get("http", {}).get("method", "GET")

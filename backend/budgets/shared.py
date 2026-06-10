@@ -161,6 +161,79 @@ def init_db():
     conn.commit()
 
 
+def backfill_user_person_links():
+    """Ensures every user has a matching people row and vice versa, matched by email.
+    Missing people are created active; missing users are created as inactive viewers
+    with username=email and no password (admin must set one before they can log in)."""
+    conn = get_db()
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO people (name, email, is_active)
+            SELECT u.name, LOWER(u.email), TRUE
+            FROM users u
+            WHERE NOT EXISTS (
+                SELECT 1 FROM people p WHERE LOWER(p.email) = LOWER(u.email) AND p.is_deleted = FALSE
+            )
+            ON CONFLICT (email) DO NOTHING
+            """
+        )
+        cur.execute(
+            """
+            INSERT INTO users (username, name, email, user_role, is_active, password_hash)
+            SELECT LOWER(p.email), p.name, LOWER(p.email), 'viewer', FALSE, NULL
+            FROM people p
+            WHERE p.is_deleted = FALSE
+              AND NOT EXISTS (
+                SELECT 1 FROM users u WHERE LOWER(u.email) = LOWER(p.email)
+              )
+            ON CONFLICT DO NOTHING
+            """
+        )
+    conn.commit()
+
+
+# ---------------------------------------------------------------------------
+# Resource scoping for viewer/contributor roles. Admins and managers see all.
+# ---------------------------------------------------------------------------
+
+SCOPED_ROLES = ("viewer", "contributor")
+
+
+def is_scoped_role(user: dict) -> bool:
+    return (user or {}).get("role") in SCOPED_ROLES
+
+
+def get_user_person_id(conn, user: dict):
+    email = (user or {}).get("email")
+    if not email:
+        return None
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT id FROM people WHERE LOWER(email) = LOWER(%s) AND is_deleted = FALSE",
+            (email,),
+        )
+        row = cur.fetchone()
+        return str(row[0]) if row else None
+
+
+def get_scoped_project_ids(conn, user: dict):
+    """Returns the list of project_ids a scoped user may access. Returns None for
+    unscoped (admin/manager) callers — treat None as 'no filter'."""
+    if not is_scoped_role(user):
+        return None
+    person_id = get_user_person_id(conn, user)
+    if not person_id:
+        return []
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT DISTINCT project_id FROM assignments "
+            "WHERE person_id = %s AND is_deleted = FALSE",
+            (person_id,),
+        )
+        return [str(r[0]) for r in cur.fetchall()]
+
+
 def hash_password(plain: str) -> str:
     import hashlib, os as _os, base64
     salt = _os.urandom(16)

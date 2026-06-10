@@ -1,5 +1,5 @@
 import { useEffect, useState, useCallback } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import PropTypes from 'prop-types';
 import Box from '@mui/material/Box';
 import Button from '@mui/material/Button';
@@ -232,13 +232,14 @@ ProjectFormDialog.defaultProps = { project: null, saveError: '' };
  */
 function ProjectsPage() {
   const navigate = useNavigate();
+  const [searchParams, setSearchParams] = useSearchParams();
   const { canEdit, canDelete } = useAuth();
   const [rows, setRows] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [search, setSearch] = useState('');
-  const [statusFilter, setStatusFilter] = useState('');
-  const [healthFilter, setHealthFilter] = useState('');
+  const [statusFilter, setStatusFilter] = useState(searchParams.get('status') || '');
+  const [healthFilter, setHealthFilter] = useState(searchParams.get('health') || '');
   const [formOpen, setFormOpen] = useState(false);
   const [editing, setEditing] = useState(null);
   const [saving, setSaving] = useState(false);
@@ -267,6 +268,24 @@ function ProjectsPage() {
     if (healthFilter) p.health = healthFilter;
     return p;
   }, [search, statusFilter, healthFilter]);
+
+  // Sync filters with URL so deep links like /projects?health=red work and
+  // are bookmarkable. Replace history entries to avoid back-button spam.
+  useEffect(() => {
+    const next = {};
+    if (statusFilter) next.status = statusFilter;
+    if (healthFilter) next.health = healthFilter;
+    setSearchParams(next, { replace: true });
+  }, [statusFilter, healthFilter, setSearchParams]);
+
+  // React to URL changes from outside the page (e.g., dashboard chip nav).
+  useEffect(() => {
+    const urlHealth = searchParams.get('health') || '';
+    const urlStatus = searchParams.get('status') || '';
+    if (urlHealth !== healthFilter) setHealthFilter(urlHealth);
+    if (urlStatus !== statusFilter) setStatusFilter(urlStatus);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [searchParams]);
 
   // Debounce server-side search/filter so we don't fire a request per keystroke.
   useEffect(() => {

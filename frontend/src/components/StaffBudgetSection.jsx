@@ -73,7 +73,7 @@ MoneyEditCell.defaultProps = { value: null, overridden: false, disabled: false }
  * Expandable Internal Staff budget section — auto-derives planned cost from
  * assignments × hourly_pay × project weeks; manager can override per row.
  */
-function StaffBudgetSection({ projectId, defaultExpanded }) {
+function StaffBudgetSection({ projectId, defaultExpanded, onChange }) {
   const { canEdit } = useAuth();
   const { mode } = useColorMode();
   const isDark = mode === 'dark';
@@ -111,6 +111,7 @@ function StaffBudgetSection({ projectId, defaultExpanded }) {
     try {
       const result = await budgetsApi.upsertStaffOverride(payload);
       setData(result?.data ?? result ?? data);
+      if (onChange) onChange();
     } catch (err) {
       setError(err.message);
     }
@@ -208,7 +209,8 @@ function StaffBudgetSection({ projectId, defaultExpanded }) {
 StaffBudgetSection.propTypes = {
   projectId: PropTypes.string,
   defaultExpanded: PropTypes.bool,
+  onChange: PropTypes.func,
 };
-StaffBudgetSection.defaultProps = { projectId: null, defaultExpanded: false };
+StaffBudgetSection.defaultProps = { projectId: null, defaultExpanded: false, onChange: null };
 
 export default StaffBudgetSection;

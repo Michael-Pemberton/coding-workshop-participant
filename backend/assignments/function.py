@@ -5,7 +5,7 @@ import logging
 
 from shared import (
     get_db, resp, get_user, extract_id, rows_to_dicts, row_to_dict,
-    filter_fields, UUID_RE,
+    filter_fields, get_scoped_project_ids, UUID_RE,
 )
 
 logger = logging.getLogger()
@@ -57,14 +57,22 @@ def handler(event=None, context=None):
     item_id = extract_id(path)
     params = event.get("queryStringParameters") or {}
     conn = get_db()
+    scope_ids = get_scoped_project_ids(conn, user)
 
     try:
         if method == "GET" and not item_id:
             conditions = ["a.is_deleted = FALSE"]
             vals: list = []
             if params.get("project_id"):
+                if scope_ids is not None and params["project_id"] not in scope_ids:
+                    return resp(200, {"data": [], "success": True})
                 conditions.append("a.project_id = %s")
                 vals.append(params["project_id"])
+            elif scope_ids is not None:
+                if not scope_ids:
+                    return resp(200, {"data": [], "success": True})
+                conditions.append("a.project_id = ANY(%s)")
+                vals.append(scope_ids)
             if params.get("person_id"):
                 conditions.append("a.person_id = %s")
                 vals.append(params["person_id"])
@@ -99,7 +107,10 @@ def handler(event=None, context=None):
                 row = cur.fetchone()
                 if not row:
                     return resp(404, {"error": "Assignment not found", "success": False})
-                return resp(200, {"data": row_to_dict(cur, row), "success": True})
+                item = row_to_dict(cur, row)
+                if scope_ids is not None and str(item.get("project_id")) not in scope_ids:
+                    return resp(404, {"error": "Assignment not found", "success": False})
+                return resp(200, {"data": item, "success": True})
 
         if method == "POST":
             if user.get("role") not in ("admin", "manager"):

@@ -42,7 +42,7 @@ import LoadingOverlay from '../components/LoadingOverlay.jsx';
 import ErrorAlert from '../components/ErrorAlert.jsx';
 import { timeLeft } from '../utils/dueDate.js';
 
-const BUDGET_CATEGORIES = ['staff', 'tooling', 'infrastructure', 'travel', 'other'];
+const BUDGET_CATEGORIES = ['external staff', 'internal staff', 'tooling', 'infrastructure', 'travel', 'other'];
 
 const EMPTY_ASSIGN = { person_id: '', role_on_project: '', hours_per_week: '' };
 const EMPTY_DELIV = { title: '', description: '', due_date: '', depends_on_id: '' };
@@ -77,6 +77,7 @@ function ProjectDetailPage() {
   const [assignments, setAssignments] = useState([]);
   const [deliverables, setDeliverables] = useState([]);
   const [budgets, setBudgets] = useState([]);
+  const [staffTotals, setStaffTotals] = useState({ total_planned: 0, total_consumed: 0, items: [] });
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [tab, setTab] = useState(0);
@@ -101,13 +102,14 @@ function ProjectDetailPage() {
     setLoading(true);
     setError('');
     try {
-      const [pj, pjAll, pp, as, dl, bg] = await Promise.all([
+      const [pj, pjAll, pp, as, dl, bg, st] = await Promise.all([
         projectsApi.getById(id),
         projectsApi.getAll(),
         peopleApi.getAll(),
         assignmentsApi.getAll({ project_id: id }),
         deliverablesApi.getAll({ project_id: id }),
         budgetsApi.getAll({ project_id: id }),
+        budgetsApi.getStaff(id),
       ]);
       setProject(pj?.data ?? pj);
       setAllProjects(pjAll?.data ?? pjAll ?? []);
@@ -115,6 +117,7 @@ function ProjectDetailPage() {
       setAssignments(as?.data ?? as ?? []);
       setDeliverables(dl?.data ?? dl ?? []);
       setBudgets(bg?.data ?? bg ?? []);
+      setStaffTotals(st?.data ?? st ?? { total_planned: 0, total_consumed: 0, items: [] });
     } catch (err) {
       setError(err.message);
     } finally {
@@ -275,8 +278,20 @@ function ProjectDetailPage() {
     finally { setSaving(false); }
   };
 
-  const totalBudgetPlanned = budgets.reduce((s, b) => s + Number(b.amount_planned || 0), 0);
-  const totalBudgetConsumed = budgets.reduce((s, b) => s + Number(b.amount_consumed || 0), 0);
+  const staffRow = (staffTotals.items?.length || staffTotals.total_planned || staffTotals.total_consumed)
+    ? {
+      id: '__staff_auto__',
+      category: 'internal staff',
+      description: `Internal Staff (auto from ${staffTotals.items?.length || 0} ${staffTotals.items?.length === 1 ? 'person' : 'people'})`,
+      amount_planned: Number(staffTotals.total_planned || 0),
+      amount_consumed: Number(staffTotals.total_consumed || 0),
+      _readOnly: true,
+    }
+    : null;
+  const displayBudgets = staffRow ? [staffRow, ...budgets] : budgets;
+
+  const totalBudgetPlanned = displayBudgets.reduce((s, b) => s + Number(b.amount_planned || 0), 0);
+  const totalBudgetConsumed = displayBudgets.reduce((s, b) => s + Number(b.amount_consumed || 0), 0);
   const projectConsumed = Number(project.budget_consumed || 0);
   const unallocatedConsumed = projectConsumed - totalBudgetConsumed;
   const projectPlanned = Number(project.budget_planned || 0);
@@ -406,7 +421,7 @@ function ProjectDetailPage() {
       {/* Budget */}
       <TabPanel value={tab} index={3}>
         <Box sx={{ mb: 2 }}>
-          <StaffBudgetSection projectId={id} defaultExpanded />
+          <StaffBudgetSection projectId={id} defaultExpanded onChange={fetchAll} />
         </Box>
         {canEdit() && (
           <Button startIcon={<AddIcon />} variant="contained" sx={{ mb: 2 }} onClick={() => openBudgetDialog(null)}>
@@ -416,7 +431,7 @@ function ProjectDetailPage() {
         <Table size="small" component={Paper}>
           <TableHead><TableRow><TableCell>Category</TableCell><TableCell>Description</TableCell><TableCell align="right">Planned</TableCell><TableCell align="right">Consumed</TableCell>{canEdit() && <TableCell />}</TableRow></TableHead>
           <TableBody>
-            {budgets.map((b) => (
+            {displayBudgets.map((b) => (
               <TableRow key={b.id}>
                 <TableCell sx={{ textTransform: 'capitalize' }}>{b.category}</TableCell>
                 <TableCell>{b.description ?? '—'}</TableCell>
@@ -424,8 +439,12 @@ function ProjectDetailPage() {
                 <TableCell align="right">${Number(b.amount_consumed || 0).toLocaleString()}</TableCell>
                 {canEdit() && (
                   <TableCell>
-                    <IconButton size="small" onClick={() => openBudgetDialog(b)}><EditIcon fontSize="small" /></IconButton>
-                    {canDelete() && <IconButton size="small" color="error" onClick={() => setConfirmDelete({ type: 'budget', item: b })}><DeleteIcon fontSize="small" /></IconButton>}
+                    {!b._readOnly && (
+                      <>
+                        <IconButton size="small" onClick={() => openBudgetDialog(b)}><EditIcon fontSize="small" /></IconButton>
+                        {canDelete() && <IconButton size="small" color="error" onClick={() => setConfirmDelete({ type: 'budget', item: b })}><DeleteIcon fontSize="small" /></IconButton>}
+                      </>
+                    )}
                   </TableCell>
                 )}
               </TableRow>

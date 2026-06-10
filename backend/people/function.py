@@ -6,7 +6,7 @@ import re
 
 from shared import (
     get_db, resp, get_user, extract_id, rows_to_dicts, row_to_dict,
-    filter_fields,
+    filter_fields, is_scoped_role, get_scoped_project_ids,
 )
 
 logger = logging.getLogger()
@@ -47,19 +47,31 @@ def list_people(event: dict) -> dict:
     except (TypeError, ValueError):
         return resp(400, {"error": "limit and offset must be integers", "success": False})
     conn = get_db()
+    user = get_user(event)
+    scope_ids = get_scoped_project_ids(conn, user)
+    where = ["p.is_deleted = FALSE"]
+    vals: list = []
+    if scope_ids is not None:
+        if not scope_ids:
+            return resp(200, {"data": [], "success": True})
+        where.append(
+            "p.id IN (SELECT person_id FROM assignments "
+            "WHERE project_id = ANY(%s) AND is_deleted = FALSE)"
+        )
+        vals.append(scope_ids)
     with conn.cursor() as cur:
         cur.execute(
-            """
+            f"""
             SELECT p.*,
                    COALESCE(SUM(a.hours_per_week), 0) AS allocated_hours_per_week
             FROM people p
             LEFT JOIN assignments a ON a.person_id = p.id AND a.is_deleted = FALSE
-            WHERE p.is_deleted = FALSE
+            WHERE {' AND '.join(where)}
             GROUP BY p.id
             ORDER BY p.name
             LIMIT %s OFFSET %s
             """,
-            (limit, offset),
+            vals + [limit, offset],
         )
         rows = rows_to_dicts(cur)
     for r in rows:
@@ -67,10 +79,25 @@ def list_people(event: dict) -> dict:
     return resp(200, {"data": rows, "success": True})
 
 
-def get_person(person_id: str) -> dict:
+def get_person(event: dict, person_id: str) -> dict:
     """GET /api/people/{id} — get person with allocation summary."""
     conn = get_db()
+    user = get_user(event)
+    scope_ids = get_scoped_project_ids(conn, user)
     with conn.cursor() as cur:
+        if scope_ids is not None:
+            if not scope_ids:
+                return resp(404, {"error": "Person not found", "success": False})
+            cur.execute(
+                """
+                SELECT 1 FROM assignments
+                WHERE person_id = %s AND project_id = ANY(%s) AND is_deleted = FALSE
+                LIMIT 1
+                """,
+                (person_id, scope_ids),
+            )
+            if not cur.fetchone():
+                return resp(404, {"error": "Person not found", "success": False})
         cur.execute(
             """
             SELECT p.*,
@@ -90,10 +117,22 @@ def get_person(person_id: str) -> dict:
     return resp(200, {"data": person, "success": True})
 
 
-def get_allocation(person_id: str) -> dict:
+def get_allocation(event: dict, person_id: str) -> dict:
     """GET /api/people/{id}/allocation — detailed allocation breakdown."""
     conn = get_db()
+    user = get_user(event)
+    scope_ids = get_scoped_project_ids(conn, user)
     with conn.cursor() as cur:
+        if scope_ids is not None:
+            if not scope_ids:
+                return resp(404, {"error": "Person not found", "success": False})
+            cur.execute(
+                "SELECT 1 FROM assignments WHERE person_id = %s AND project_id = ANY(%s) "
+                "AND is_deleted = FALSE LIMIT 1",
+                (person_id, scope_ids),
+            )
+            if not cur.fetchone():
+                return resp(404, {"error": "Person not found", "success": False})
         cur.execute("SELECT * FROM people WHERE id = %s AND is_deleted = FALSE", (person_id,))
         row = cur.fetchone()
         if not row:
@@ -149,6 +188,17 @@ def create_person(event: dict, user: dict) -> dict:
             vals,
         )
         row = cur.fetchone()
+        # Auto-create an inactive viewer user account for this person if one
+        # doesn't already exist. password_hash is NULL so login is blocked
+        # until admin sets a password and activates the account.
+        cur.execute(
+            """
+            INSERT INTO users (username, name, email, user_role, is_active, password_hash)
+            VALUES (%s, %s, %s, 'viewer', FALSE, NULL)
+            ON CONFLICT (email) DO NOTHING
+            """,
+            (body["email"], body.get("name") or body["email"], body["email"]),
+        )
         conn.commit()
         return resp(201, {"data": row_to_dict(cur, row), "success": True})
 
@@ -216,11 +266,11 @@ def handler(event=None, context=None):
 
     try:
         if method == "GET" and person_id and sub_path == "allocation":
-            return get_allocation(person_id)
+            return get_allocation(event, person_id)
         if method == "GET" and not person_id:
             return list_people(event)
         if method == "GET" and person_id:
-            return get_person(person_id)
+            return get_person(event, person_id)
         if method == "POST":
             return create_person(event, user)
         if method == "PUT" and person_id:

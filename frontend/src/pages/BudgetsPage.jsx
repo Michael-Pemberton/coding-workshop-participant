@@ -26,7 +26,7 @@ import ErrorAlert from '../components/ErrorAlert.jsx';
 import StaffBudgetSection from '../components/StaffBudgetSection.jsx';
 import { useColorMode } from '../contexts/ColorModeContext.jsx';
 
-const CATEGORIES = ['staff', 'tooling', 'infrastructure', 'travel', 'other'];
+const CATEGORIES = ['external staff', 'internal staff', 'tooling', 'infrastructure', 'travel', 'other'];
 const EMPTY_FORM = { category: 'other', description: '', amount_planned: '', amount_consumed: '' };
 const DRAFT_KEY = 'budgets:newDraft';
 
@@ -144,6 +144,7 @@ function BudgetsPage() {
   const { mode } = useColorMode();
   const isDark = mode === 'dark';
   const [rows, setRows] = useState([]);
+  const [staffTotals, setStaffTotals] = useState({ total_planned: 0, total_consumed: 0, items: [] });
   const [projects, setProjects] = useState([]);
   const [selectedProject, setSelectedProject] = useState(() => localStorage.getItem('budgets:selectedProject') || '');
   const [loading, setLoading] = useState(false);
@@ -165,12 +166,16 @@ function BudgetsPage() {
   }, []);
 
   const fetchBudgets = useCallback(async () => {
-    if (!selectedProject) { setRows([]); return; }
+    if (!selectedProject) { setRows([]); setStaffTotals({ total_planned: 0, total_consumed: 0, items: [] }); return; }
     setLoading(true);
     setError('');
     try {
-      const result = await budgetsApi.getAll({ project_id: selectedProject });
-      setRows(result?.data ?? result ?? []);
+      const [items, staff] = await Promise.all([
+        budgetsApi.getAll({ project_id: selectedProject }),
+        budgetsApi.getStaff(selectedProject),
+      ]);
+      setRows(items?.data ?? items ?? []);
+      setStaffTotals(staff?.data ?? staff ?? { total_planned: 0, total_consumed: 0, items: [] });
     } catch (err) {
       setError(err.message);
     } finally {
@@ -214,8 +219,23 @@ function BudgetsPage() {
     }
   };
 
-  const totalPlanned = rows.reduce((s, r) => s + Number(r.amount_planned || 0), 0);
-  const totalConsumed = rows.reduce((s, r) => s + Number(r.amount_consumed || 0), 0);
+  // Synthesize a non-editable row for the auto-derived Internal Staff total so
+  // it shows up in the main budget table alongside manually-entered items.
+  const staffRow = (staffTotals.items?.length || staffTotals.total_planned || staffTotals.total_consumed)
+    ? {
+      id: '__staff_auto__',
+      category: 'internal staff',
+      description: `Internal Staff (auto from ${staffTotals.items?.length || 0} ${staffTotals.items?.length === 1 ? 'person' : 'people'})`,
+      amount_planned: Number(staffTotals.total_planned || 0),
+      amount_consumed: Number(staffTotals.total_consumed || 0),
+      _readOnly: true,
+    }
+    : null;
+
+  const displayRows = staffRow ? [staffRow, ...rows] : rows;
+
+  const totalPlanned = displayRows.reduce((s, r) => s + Number(r.amount_planned || 0), 0);
+  const totalConsumed = displayRows.reduce((s, r) => s + Number(r.amount_consumed || 0), 0);
 
   const columns = [
     { field: 'category', headerName: 'Category', width: 120, renderCell: ({ value }) => <span style={{ textTransform: 'capitalize' }}>{value}</span> },
@@ -247,8 +267,8 @@ function BudgetsPage() {
       field: 'actions', headerName: '', width: 90, sortable: false,
       renderCell: ({ row }) => (
         <Box onClick={(e) => e.stopPropagation()}>
-          {canEdit() && <IconButton size="small" onClick={() => { setEditing(row); setFormOpen(true); }}><EditIcon fontSize="small" /></IconButton>}
-          {canDelete() && <IconButton size="small" color="error" onClick={() => setDeleteTarget(row)}><DeleteIcon fontSize="small" /></IconButton>}
+          {!row._readOnly && canEdit() && <IconButton size="small" onClick={() => { setEditing(row); setFormOpen(true); }}><EditIcon fontSize="small" /></IconButton>}
+          {!row._readOnly && canDelete() && <IconButton size="small" color="error" onClick={() => setDeleteTarget(row)}><DeleteIcon fontSize="small" /></IconButton>}
         </Box>
       ),
     },
@@ -279,7 +299,7 @@ function BudgetsPage() {
         </TextField>
       </Box>
 
-      {selectedProject && rows.length > 0 && (
+      {selectedProject && displayRows.length > 0 && (
         <Box sx={{ display: 'flex', gap: 4, mb: 2, p: 2, bgcolor: isDark ? '#1e1e22' : 'action.hover', color: isDark ? '#fff' : 'inherit', borderRadius: 1 }}>
           <Box>
             <Typography variant="caption" sx={{ color: isDark ? 'rgba(255,255,255,0.7)' : 'text.secondary' }}>Total Planned</Typography>
@@ -302,7 +322,7 @@ function BudgetsPage() {
 
       {selectedProject && (
         <Box sx={{ mb: 2 }}>
-          <StaffBudgetSection projectId={selectedProject} />
+          <StaffBudgetSection projectId={selectedProject} onChange={fetchBudgets} />
         </Box>
       )}
 
@@ -310,7 +330,7 @@ function BudgetsPage() {
         <Typography color="text.secondary">Select a project to view its budget.</Typography>
       ) : (
         <DataGrid
-          rows={rows}
+          rows={displayRows}
           columns={columns}
           loading={loading}
           autoHeight

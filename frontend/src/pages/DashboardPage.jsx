@@ -144,9 +144,24 @@ function DashboardPage() {
                 Project Health (RAG)
               </Typography>
               <Box sx={{ display: 'flex', gap: 1, flexWrap: 'wrap', mt: 1 }}>
-                <Chip label={`${greenCount} Green`} color="success" />
-                <Chip label={`${amberCount} Amber`} color="warning" />
-                <Chip label={`${redCount} Red`} color="error" />
+                <Chip
+                  label={`${greenCount} Green`}
+                  color="success"
+                  clickable
+                  onClick={() => navigate('/projects?health=green')}
+                />
+                <Chip
+                  label={`${amberCount} Amber`}
+                  color="warning"
+                  clickable
+                  onClick={() => navigate('/projects?health=amber')}
+                />
+                <Chip
+                  label={`${redCount} Red`}
+                  color="error"
+                  clickable
+                  onClick={() => navigate('/projects?health=red')}
+                />
               </Box>
             </CardContent>
           </Card>

@@ -5,7 +5,7 @@ import logging
 
 from shared import (
     get_db, resp, get_user, extract_id, rows_to_dicts, row_to_dict,
-    calculate_health, filter_fields,
+    calculate_health, filter_fields, get_scoped_project_ids,
     VALID_STATUSES, VALID_HEALTH,
 )
 
@@ -54,8 +54,14 @@ def list_projects(event: dict) -> dict:
     """GET /api/projects — list all projects with optional filters."""
     params = event.get("queryStringParameters") or {}
     conn = get_db()
+    scope_ids = get_scoped_project_ids(conn, get_user(event))
     conditions = ["is_deleted = FALSE"]
     vals: list = []
+    if scope_ids is not None:
+        if not scope_ids:
+            return resp(200, {"data": [], "success": True})
+        conditions.append("id = ANY(%s)")
+        vals.append(scope_ids)
     if params.get("status"):
         if params["status"] not in _VALID_PROJECT_STATUSES:
             return resp(400, {"error": f"status must be one of: {sorted(_VALID_PROJECT_STATUSES)}", "success": False})
@@ -82,9 +88,12 @@ def list_projects(event: dict) -> dict:
         return resp(200, {"data": [_with_health(r) for r in rows_to_dicts(cur)], "success": True})
 
 
-def get_project(project_id: str) -> dict:
+def get_project(event: dict, project_id: str) -> dict:
     """GET /api/projects/{id} — get a single project."""
     conn = get_db()
+    scope_ids = get_scoped_project_ids(conn, get_user(event))
+    if scope_ids is not None and project_id not in scope_ids:
+        return resp(404, {"error": "Project not found", "success": False})
     with conn.cursor() as cur:
         cur.execute("SELECT * FROM projects WHERE id = %s AND is_deleted = FALSE", (project_id,))
         row = cur.fetchone()
@@ -195,7 +204,7 @@ def handler(event=None, context=None):
         if method == "GET" and not project_id:
             return list_projects(event)
         if method == "GET" and project_id:
-            return get_project(project_id)
+            return get_project(event, project_id)
         if method == "POST":
             return create_project(event, user)
         if method == "PUT" and project_id:

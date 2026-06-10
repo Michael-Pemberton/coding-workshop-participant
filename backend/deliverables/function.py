@@ -6,7 +6,7 @@ from datetime import date
 
 from shared import (
     get_db, resp, get_user, extract_id, rows_to_dicts, row_to_dict,
-    filter_fields,
+    filter_fields, get_scoped_project_ids,
 )
 
 logger = logging.getLogger()
@@ -130,14 +130,22 @@ def handler(event=None, context=None):
     item_id = extract_id(path)
     params = event.get("queryStringParameters") or {}
     conn = get_db()
+    scope_ids = get_scoped_project_ids(conn, user)
 
     try:
         if method == "GET" and not item_id:
             conditions = ["d.is_deleted = FALSE"]
             vals: list = []
             if params.get("project_id"):
+                if scope_ids is not None and params["project_id"] not in scope_ids:
+                    return resp(200, {"data": [], "success": True})
                 conditions.append("d.project_id = %s")
                 vals.append(params["project_id"])
+            elif scope_ids is not None:
+                if not scope_ids:
+                    return resp(200, {"data": [], "success": True})
+                conditions.append("d.project_id = ANY(%s)")
+                vals.append(scope_ids)
             try:
                 limit = min(int(params.get("limit", 100)), 500)
                 offset = int(params.get("offset", 0))
@@ -160,7 +168,10 @@ def handler(event=None, context=None):
                 row = cur.fetchone()
                 if not row:
                     return resp(404, {"error": "Deliverable not found", "success": False})
-                return resp(200, {"data": _with_rag(row_to_dict(cur, row)), "success": True})
+                item = _with_rag(row_to_dict(cur, row))
+                if scope_ids is not None and str(item.get("project_id")) not in scope_ids:
+                    return resp(404, {"error": "Deliverable not found", "success": False})
+                return resp(200, {"data": item, "success": True})
 
         if method == "POST":
             if user.get("role") not in ("admin", "manager", "contributor"):

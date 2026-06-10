@@ -46,6 +46,13 @@ resource "aws_cloudfront_distribution" "this" {
     response_page_path    = "/index.html"
   }
 
+  custom_error_response {
+    error_code            = 403
+    error_caching_min_ttl = 300
+    response_code         = 200
+    response_page_path    = "/index.html"
+  }
+
   # logging_config {
   #   include_cookies = false
   #   bucket          = var.aws_bucket

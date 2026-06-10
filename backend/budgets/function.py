@@ -5,7 +5,7 @@ import logging
 
 from shared import (
     get_db, resp, get_user, extract_id, rows_to_dicts, row_to_dict,
-    filter_fields, VALID_BUDGET_CATEGORIES,
+    filter_fields, get_scoped_project_ids, VALID_BUDGET_CATEGORIES,
 )
 
 logger = logging.getLogger()
@@ -78,7 +78,7 @@ def list_staff_budget(conn, project_id: str) -> dict:
         hpw = float(hours or 0)
         planned_auto = round(rate * hpw * weeks, 2)
         planned_eff = float(ov_planned) if ov_planned is not None else planned_auto
-        consumed_eff = float(ov_consumed) if ov_consumed is not None else 0.0
+        consumed_eff = float(ov_consumed) if ov_consumed is not None else planned_eff
         items.append({
             "person_id": str(person_id),
             "name": name,
@@ -152,6 +152,7 @@ def handler(event=None, context=None):
     item_id = extract_id(path)
     params = event.get("queryStringParameters") or {}
     conn = get_db()
+    scope_ids = get_scoped_project_ids(conn, user)
 
     # Sub-routes for the computed/override staff budget.
     if path.endswith("/staff"):
@@ -160,6 +161,8 @@ def handler(event=None, context=None):
         pid = params.get("project_id")
         if not pid:
             return resp(400, {"error": "project_id is required", "success": False})
+        if scope_ids is not None and pid not in scope_ids:
+            return resp(404, {"error": "Project not found", "success": False})
         try:
             return resp(200, {"data": list_staff_budget(conn, pid), "success": True})
         except Exception as exc:
@@ -185,8 +188,15 @@ def handler(event=None, context=None):
             conditions = ["is_deleted = FALSE"]
             vals: list = []
             if params.get("project_id"):
+                if scope_ids is not None and params["project_id"] not in scope_ids:
+                    return resp(200, {"data": [], "success": True})
                 conditions.append("project_id = %s")
                 vals.append(params["project_id"])
+            elif scope_ids is not None:
+                if not scope_ids:
+                    return resp(200, {"data": [], "success": True})
+                conditions.append("project_id = ANY(%s)")
+                vals.append(scope_ids)
             try:
                 limit = min(int(params.get("limit", 100)), 500)
                 offset = int(params.get("offset", 0))
@@ -205,7 +215,10 @@ def handler(event=None, context=None):
                 row = cur.fetchone()
                 if not row:
                     return resp(404, {"error": "Budget item not found", "success": False})
-                return resp(200, {"data": row_to_dict(cur, row), "success": True})
+                item = row_to_dict(cur, row)
+                if scope_ids is not None and str(item.get("project_id")) not in scope_ids:
+                    return resp(404, {"error": "Budget item not found", "success": False})
+                return resp(200, {"data": item, "success": True})
 
         if method == "POST":
             if user.get("role") not in ("admin", "manager"):
