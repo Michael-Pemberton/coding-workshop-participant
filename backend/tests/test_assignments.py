@@ -79,3 +79,56 @@ def test_unauthenticated_request(mocker, mock_conn):
     body = json.loads(result["body"])
 
     assert result["statusCode"] == 401
+
+
+def _assignment_row_cols():
+    return [
+        ("id",), ("person_id",), ("project_id",), ("role_on_project",),
+        ("hours_per_week",), ("start_date",), ("end_date",), ("is_deleted",),
+        ("created_at",), ("updated_at",),
+    ]
+
+
+def test_create_assignment_flags_overallocation(mocker, mock_conn):
+    person_id = "00000000-0000-0000-0000-000000000001"
+    project_id = "00000000-0000-0000-0000-000000000002"
+    inserted = ("aid", person_id, project_id, "dev", 50, None, None, False, "now", "now")
+    mock_conn._cur.description = _assignment_row_cols()
+    # Order of fetchone calls in POST flow:
+    #   1) duplicate check → None
+    #   2) INSERT RETURNING *  → inserted row
+    #   3) SUM(hours_per_week) → (50,)
+    #   4) weekly_hours_capacity → (40,)
+    mock_conn._cur.fetchone.side_effect = [None, inserted, (50,), (40,)]
+    mocker.patch.object(handler_mod, "get_db", return_value=mock_conn)
+
+    result = handler_mod.handler(make_event("POST", "/api/assignments", body={
+        "person_id": person_id,
+        "project_id": project_id,
+        "hours_per_week": 50,
+    }))
+    body = json.loads(result["body"])
+
+    assert result["statusCode"] == 201
+    assert body["data"]["overallocation_warning"] is True
+    assert body["data"]["total_allocated_hours"] == 50
+    assert body["data"]["capacity"] == 40
+
+
+def test_create_assignment_no_overallocation_when_under_capacity(mocker, mock_conn):
+    person_id = "00000000-0000-0000-0000-000000000001"
+    project_id = "00000000-0000-0000-0000-000000000002"
+    inserted = ("aid", person_id, project_id, "dev", 20, None, None, False, "now", "now")
+    mock_conn._cur.description = _assignment_row_cols()
+    mock_conn._cur.fetchone.side_effect = [None, inserted, (20,), (40,)]
+    mocker.patch.object(handler_mod, "get_db", return_value=mock_conn)
+
+    result = handler_mod.handler(make_event("POST", "/api/assignments", body={
+        "person_id": person_id,
+        "project_id": project_id,
+        "hours_per_week": 20,
+    }))
+    body = json.loads(result["body"])
+
+    assert result["statusCode"] == 201
+    assert body["data"]["overallocation_warning"] is False

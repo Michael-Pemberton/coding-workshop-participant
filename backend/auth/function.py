@@ -1,22 +1,18 @@
-"""Auth Lambda — Google OAuth verification and user management."""
+"""Auth Lambda — username/password login, JWT issuance, user management."""
 
 import json
 import logging
-import os
 from datetime import datetime, timedelta, timezone
 
 import jwt
-import requests
 
 from shared import (
     get_db, resp, extract_id, rows_to_dicts, row_to_dict, IS_LOCAL, JWT_SECRET,
-    hash_password, verify_password,
+    hash_password, verify_password, init_db,
 )
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
-
-GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID", "")
 
 # Simple in-memory rate limiter for the password login endpoint.
 # Tracks failed attempts per username: {username: (count, first_failure_ts)}
@@ -82,68 +78,6 @@ def make_jwt(user: dict) -> str:
         "exp": datetime.now(tz=timezone.utc) + timedelta(hours=24),
     }
     return jwt.encode(payload, JWT_SECRET, algorithm="HS256")
-
-
-def upsert_user(conn, email: str, name: str, picture: str = None) -> dict:
-    """Finds or creates a user by email, returns the user record."""
-    with conn.cursor() as cur:
-        cur.execute("SELECT * FROM users WHERE email = %s", (email,))
-        row = cur.fetchone()
-        if row:
-            return row_to_dict(cur, row)
-        cur.execute(
-            "INSERT INTO users (email, name, picture) VALUES (%s, %s, %s) RETURNING *",
-            (email, name, picture),
-        )
-        row = cur.fetchone()
-        conn.commit()
-        return row_to_dict(cur, row)
-
-
-def verify_google_token(body: dict) -> dict:
-    """POST /api/auth/verify — verifies a Google ID token or handles dev bypass."""
-    conn = get_db()
-
-    if body.get("dev_login") and IS_LOCAL:
-        email = body.get("email", "admin@acme.com")
-        name = body.get("name", "Dev Admin")
-        user = upsert_user(conn, email, name)
-        if user["user_role"] != "admin":
-            with conn.cursor() as cur:
-                cur.execute(
-                    "UPDATE users SET user_role = 'admin' WHERE id = %s RETURNING *",
-                    (user["id"],),
-                )
-                row = cur.fetchone()
-                conn.commit()
-                user = row_to_dict(cur, row)
-        token = make_jwt(user)
-        return resp(200, {"data": {"token": token, "user": user}, "success": True})
-
-    credential = body.get("credential")
-    if not credential:
-        return resp(400, {"error": "credential is required", "success": False})
-
-    try:
-        google_resp = requests.get(
-            f"https://www.googleapis.com/oauth2/v3/tokeninfo?id_token={credential}",
-            timeout=10,
-        )
-        if google_resp.status_code != 200:
-            return resp(401, {"error": "Invalid Google token", "success": False})
-        claims = google_resp.json()
-        if GOOGLE_CLIENT_ID and claims.get("aud") != GOOGLE_CLIENT_ID:
-            return resp(401, {"error": "Token audience mismatch", "success": False})
-        email = claims.get("email")
-        name = claims.get("name", email)
-        picture = claims.get("picture")
-    except requests.RequestException as exc:
-        logger.error("Google token verification failed: %s", exc)
-        return resp(502, {"error": "Failed to verify token with Google", "success": False})
-
-    user = upsert_user(conn, email, name, picture)
-    token = make_jwt(user)
-    return resp(200, {"data": {"token": token, "user": user}, "success": True})
 
 
 VALID_ROLES = ("admin", "manager", "contributor", "viewer")
@@ -278,6 +212,26 @@ def handler(event=None, context=None):
     """Routes auth requests."""
     if event is None:
         event = {}
+
+    # One-shot bootstrap: invoke directly with {"action": "init"} to create
+    # the schema and seed an admin. Not reachable via API Gateway / Function URL.
+    if event.get("action") == "init":
+        init_db()
+        conn = get_db()
+        with conn.cursor() as cur:
+            cur.execute("SELECT COUNT(*) FROM users")
+            count = cur.fetchone()[0]
+            seeded = False
+            if count == 0:
+                cur.execute(
+                    "INSERT INTO users (username, name, email, password_hash, user_role) "
+                    "VALUES (%s, %s, %s, %s, %s)",
+                    ("admin", "Admin", "admin@acme.com", hash_password("admin123"), "admin"),
+                )
+                conn.commit()
+                seeded = True
+        return {"ok": True, "seeded_admin": seeded, "user_count": count + (1 if seeded else 0)}
+
     method = (event.get("requestContext") or {}).get("http", {}).get("method", "GET")
     path = event.get("rawPath", "")
 
@@ -290,10 +244,6 @@ def handler(event=None, context=None):
         if method == "POST" and path.endswith("/login"):
             body = json.loads(event.get("body") or "{}")
             return login_with_password(body)
-
-        if method == "POST" and "verify" in path:
-            body = json.loads(event.get("body") or "{}")
-            return verify_google_token(body)
 
         user_payload = get_user_from_token(event)
         if not user_payload and not IS_LOCAL:
@@ -374,4 +324,4 @@ def handler(event=None, context=None):
 
 
 if __name__ == "__main__":
-    print(handler({"requestContext": {"http": {"method": "POST"}}, "rawPath": "/api/auth/verify", "body": '{"dev_login": true}'}))
+    print(handler({"requestContext": {"http": {"method": "GET"}}, "rawPath": "/api/auth/me"}))

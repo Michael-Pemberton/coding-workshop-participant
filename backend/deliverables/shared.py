@@ -27,9 +27,10 @@ _conn = None
 
 DDL = """
 CREATE EXTENSION IF NOT EXISTS "pgcrypto";
-CREATE TABLE IF NOT EXISTS users (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), email VARCHAR(255) UNIQUE NOT NULL, name VARCHAR(255) NOT NULL, picture TEXT, user_role VARCHAR(50) NOT NULL DEFAULT 'viewer', is_active BOOLEAN DEFAULT TRUE, username VARCHAR(100) UNIQUE, password_hash TEXT, created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(), updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW());
+CREATE TABLE IF NOT EXISTS users (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), email VARCHAR(255) UNIQUE NOT NULL, name VARCHAR(255) NOT NULL, user_role VARCHAR(50) NOT NULL DEFAULT 'viewer', is_active BOOLEAN DEFAULT TRUE, username VARCHAR(100) UNIQUE, password_hash TEXT, created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(), updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW());
 ALTER TABLE users ADD COLUMN IF NOT EXISTS username VARCHAR(100) UNIQUE;
 ALTER TABLE users ADD COLUMN IF NOT EXISTS password_hash TEXT;
+ALTER TABLE users DROP COLUMN IF EXISTS picture;
 CREATE TABLE IF NOT EXISTS projects (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), title VARCHAR(255) NOT NULL, description TEXT, status VARCHAR(50) NOT NULL DEFAULT 'active', health VARCHAR(50) NOT NULL DEFAULT 'green', start_date DATE, end_date DATE, budget_planned DECIMAL(15,2) DEFAULT 0.00, budget_consumed DECIMAL(15,2) DEFAULT 0.00, dependency_ids UUID[] DEFAULT '{}', is_deleted BOOLEAN DEFAULT FALSE, created_by UUID, created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(), updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW());
 CREATE TABLE IF NOT EXISTS people (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), name VARCHAR(255) NOT NULL, email VARCHAR(255) UNIQUE NOT NULL, title VARCHAR(100), weekly_hours_capacity INTEGER DEFAULT 40, hourly_pay DECIMAL(15,2), is_active BOOLEAN DEFAULT TRUE, is_deleted BOOLEAN DEFAULT FALSE, created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(), updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW());
 ALTER TABLE people ADD COLUMN IF NOT EXISTS hourly_pay DECIMAL(15,2);
@@ -92,7 +93,7 @@ def get_db():
         f"dbname={os.getenv('POSTGRES_NAME', 'postgres')} "
         f"user={os.getenv('POSTGRES_USER', 'postgres')} "
         f"password={os.getenv('POSTGRES_PASS', 'postgres123')} "
-        f"connect_timeout=3"
+        f"connect_timeout=30"
         + ("" if IS_LOCAL else " sslmode=require")
     )
     _conn = psycopg.connect(dsn)

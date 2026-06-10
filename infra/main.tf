@@ -14,3 +14,12 @@ resource "random_pet" "this" {
     seed_input = try(var.aws_app_code, terraform.workspace)
   }
 }
+
+resource "random_password" "jwt_secret" {
+  length  = 64
+  special = false
+
+  keepers = {
+    seed_input = try(var.aws_app_code, terraform.workspace)
+  }
+}

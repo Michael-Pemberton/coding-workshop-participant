@@ -34,6 +34,8 @@ def _time_rag(due) -> tuple[str, str]:
     days = (d - date.today()).days
     if days < 0:
         return "red", f"Overdue by {-days} day(s)"
+    if days <= 1:
+        return "red", f"Due in {days} day(s)"
     if days <= 5:
         return "amber", f"Due in {days} day(s)"
     return "green", f"Due in {days} day(s)"

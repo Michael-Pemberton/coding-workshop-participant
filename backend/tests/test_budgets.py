@@ -78,3 +78,14 @@ def test_unauthenticated_request(mocker, mock_conn):
     body = json.loads(result["body"])
 
     assert result["statusCode"] == 401
+
+
+def test_sync_project_budget_executes_update_and_commits(mock_conn):
+    project_id = "00000000-0000-0000-0000-000000000001"
+    handler_mod.sync_project_budget(mock_conn, project_id)
+    mock_conn._cur.execute.assert_called_once()
+    sql, params = mock_conn._cur.execute.call_args[0]
+    assert "UPDATE projects" in sql
+    assert "GREATEST" in sql  # never lowers existing budget_consumed
+    assert params == (project_id, project_id)
+    mock_conn.commit.assert_called_once()

@@ -149,8 +149,10 @@ if [ ! -f .env ] && [ -f $BUILD_DIR/.env.local ]; then
     mv -f $BUILD_DIR/.env.local $BUILD_DIR/.env
 fi
 
-# Upload built frontend to S3 (with deletion of old files)
-aws s3 sync $BUILD_DIR/ s3://$BUCKET_NAME/ --delete $AWS_ENDPOINT
+# Upload built frontend to S3 (with deletion of old files).
+# Exclude lambda/* — the same bucket stores Lambda deployment packages,
+# and a bare --delete would wipe them and break cold starts.
+aws s3 sync $BUILD_DIR/ s3://$BUCKET_NAME/ --delete --exclude "lambda/*" $AWS_ENDPOINT
 
 # Invalidate CloudFront cache for AWS deployments
 if [ "$ENVIRONMENT" = "aws" ]; then

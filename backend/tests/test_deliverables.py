@@ -90,3 +90,29 @@ def test_unauthenticated_request(mocker, mock_conn):
     body = json.loads(result["body"])
 
     assert result["statusCode"] == 401
+
+
+def test_would_cycle_self_reference(mock_conn):
+    item_id = "00000000-0000-0000-0000-000000000001"
+    assert handler_mod._would_cycle(mock_conn, item_id, item_id) is True
+
+
+def test_would_cycle_no_dependency(mock_conn):
+    assert handler_mod._would_cycle(mock_conn, "any", None) is False
+
+
+def test_would_cycle_detects_loop_in_chain(mock_conn):
+    a = "00000000-0000-0000-0000-00000000000a"
+    b = "00000000-0000-0000-0000-00000000000b"
+    # Inserting a new deliverable (item_id=None) whose depends_on_id = b,
+    # and b depends on a, and a depends on b → cycle.
+    mock_conn._cur.fetchone.side_effect = [(a,), (b,)]
+    assert handler_mod._would_cycle(mock_conn, None, b) is True
+
+
+def test_would_cycle_clean_chain_returns_false(mock_conn):
+    a = "00000000-0000-0000-0000-00000000000a"
+    b = "00000000-0000-0000-0000-00000000000b"
+    # b → a → (none)
+    mock_conn._cur.fetchone.side_effect = [(a,), (None,)]
+    assert handler_mod._would_cycle(mock_conn, None, b) is False
