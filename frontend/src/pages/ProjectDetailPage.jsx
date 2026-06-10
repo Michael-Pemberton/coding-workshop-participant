@@ -301,7 +301,7 @@ function ProjectDetailPage() {
         sx={{
           mb: 1,
           '& .MuiTabs-indicator': { display: 'none' },
-          '& .MuiTab-root': { borderRadius: 1, mr: 0.5, minHeight: 40, color: 'rgba(255,255,255,0.7)' },
+          '& .MuiTab-root': { borderRadius: 1, mr: 0.5, minHeight: 40, color: 'text.secondary' },
           '& .MuiTab-root.Mui-selected': {
             bgcolor: 'primary.main',
             color: '#fff',

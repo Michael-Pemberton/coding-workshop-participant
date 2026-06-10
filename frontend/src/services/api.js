@@ -77,25 +77,11 @@ export const budgetsApi = {
 
 export const authApi = {
   /**
-   * Verifies a Google ID token and returns {token, user}.
-   * @param {string} credential - Google ID token.
-   */
-  verify: (credential) => client.post('/api/auth/verify', { credential }),
-
-  /**
    * Logs in with username + password.
    * @param {string} username @param {string} password
    */
   login: (username, password) =>
     client.post('/api/auth/login', { username, password }),
-
-  /** Developer login bypass (IS_LOCAL=true only). */
-  devLogin: () =>
-    client.post('/api/auth/verify', {
-      dev_login: true,
-      email: 'admin@acme.com',
-      name: 'Dev Admin',
-    }),
 
   /** Returns current user from JWT. */
   me: () => client.get('/api/auth/me'),

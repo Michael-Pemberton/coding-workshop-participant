@@ -37,9 +37,8 @@ describe('api service structure', () => {
   });
 
   it('authApi exposes all auth methods', () => {
-    expect(typeof authApi.verify).toBe('function');
+    expect(typeof authApi.login).toBe('function');
     expect(typeof authApi.me).toBe('function');
-    expect(typeof authApi.devLogin).toBe('function');
     expect(typeof authApi.getUsers).toBe('function');
     expect(typeof authApi.updateRole).toBe('function');
   });

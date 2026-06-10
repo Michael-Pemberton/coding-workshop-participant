@@ -247,11 +247,11 @@ function ProjectsPage() {
   const [form, setForm] = useState(EMPTY_FORM);
   const [saveError, setSaveError] = useState('');
 
-  const fetchProjects = useCallback(async () => {
+  const fetchProjects = useCallback(async (params) => {
     setLoading(true);
     setError('');
     try {
-      const result = await projectsApi.getAll();
+      const result = await projectsApi.getAll(params);
       setRows(result?.data ?? result ?? []);
     } catch (err) {
       setError(err.message);
@@ -260,14 +260,19 @@ function ProjectsPage() {
     }
   }, []);
 
-  useEffect(() => { fetchProjects(); }, [fetchProjects]);
+  const currentParams = useCallback(() => {
+    const p = {};
+    if (search.trim()) p.search = search.trim();
+    if (statusFilter) p.status = statusFilter;
+    if (healthFilter) p.health = healthFilter;
+    return p;
+  }, [search, statusFilter, healthFilter]);
 
-  const filtered = rows.filter((r) => {
-    if (search && !r.title.toLowerCase().includes(search.toLowerCase())) return false;
-    if (statusFilter && r.status !== statusFilter) return false;
-    if (healthFilter && r.health !== healthFilter) return false;
-    return true;
-  });
+  // Debounce server-side search/filter so we don't fire a request per keystroke.
+  useEffect(() => {
+    const t = setTimeout(() => fetchProjects(currentParams()), 300);
+    return () => clearTimeout(t);
+  }, [search, statusFilter, healthFilter, fetchProjects, currentParams]);
 
   const handleSave = async (data) => {
     setSaving(true);
@@ -287,7 +292,7 @@ function ProjectsPage() {
       setFormOpen(false);
       setEditing(null);
       setForm(EMPTY_FORM);
-      await fetchProjects();
+      await fetchProjects(currentParams());
     } catch (err) {
       setSaveError(err.message);
     } finally {
@@ -300,7 +305,7 @@ function ProjectsPage() {
     try {
       await projectsApi.remove(deleteTarget.id);
       setDeleteTarget(null);
-      await fetchProjects();
+      await fetchProjects(currentParams());
     } catch (err) {
       setError(err.message);
     } finally {
@@ -447,10 +452,10 @@ function ProjectsPage() {
         </TextField>
       </Box>
 
-      {error && <ErrorAlert message={error} onRetry={fetchProjects} />}
+      {error && <ErrorAlert message={error} onRetry={() => fetchProjects(currentParams())} />}
 
       <DataGrid
-        rows={filtered}
+        rows={rows}
         columns={columns}
         loading={loading}
         autoHeight

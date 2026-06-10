@@ -55,23 +55,6 @@ export function AuthProvider({ children }) {
   }, [token, user, logout]);
 
   /**
-   * Exchanges a Google OAuth credential for an app JWT.
-   * @param {string} credential - Google ID token from @react-oauth/google.
-   */
-  const login = useCallback(async (credential) => {
-    const result = await authApi.verify(credential);
-    applyToken(result.token, result.user);
-  }, [applyToken]);
-
-  /**
-   * Developer bypass login (only works when backend IS_LOCAL=true).
-   */
-  const devLogin = useCallback(async () => {
-    const result = await authApi.devLogin();
-    applyToken(result.token, result.user);
-  }, [applyToken]);
-
-  /**
    * Logs in with username + password.
    * @param {string} username
    * @param {string} password
@@ -101,9 +84,7 @@ export function AuthProvider({ children }) {
     token,
     isAuthenticated: !!user,
     loading,
-    login,
     loginWithPassword,
-    devLogin,
     logout,
     canEdit,
     canDelete,
