@@ -45,23 +45,44 @@ _WORSE = {"green": 0, "amber": 1, "red": 2}
 
 
 def _with_rag(row: dict) -> dict:
-    """Computes status + health_reason from due_date, worsened if the dependency's
-    due_date is after this deliverable's due_date."""
+    """Computes status + health_reason from due_date, then:
+    - appends "; Depends on \"X\"" when this row has a prerequisite;
+    - worsens to the prerequisite's time-band if worse (forward propagation);
+    - worsens to the earliest dependant's time-band if worse (reverse propagation).
+    Worsening uses "<color> due to prerequisite/dependant due in N day(s)"."""
     if row is None:
         return row
     color, reason = _time_rag(row.get("due_date"))
-    dep_due = _as_date(row.get("depends_on_due_date"))
     own_due = _as_date(row.get("due_date"))
-    if dep_due and own_due and dep_due > own_due:
-        dep_reason = (
-            f"Depends on \"{row.get('depends_on_title') or 'another deliverable'}\" "
-            f"(due {dep_due.isoformat()}) which is after this deliverable's due date "
-            f"({own_due.isoformat()})"
-        )
-        if _WORSE["red"] > _WORSE[color]:
-            color, reason = "red", dep_reason
-        else:
-            reason = f"{reason}; {dep_reason}"
+
+    dep_title = row.get("depends_on_title")
+    dep_due = _as_date(row.get("depends_on_due_date"))
+    if dep_title:
+        reason = f"{reason}; Depends on \"{dep_title}\""
+
+    if dep_due:
+        d_color, _ = _time_rag(dep_due)
+        if _WORSE[d_color] > _WORSE[color]:
+            days = (dep_due - date.today()).days
+            color = d_color
+            reason = (
+                f"{d_color} due to prerequisite overdue by {-days} day(s)"
+                if days < 0
+                else f"{d_color} due to prerequisite due in {days} day(s)"
+            )
+
+    earliest_dep = _as_date(row.get("earliest_dependant_due"))
+    if earliest_dep and (own_due is None or earliest_dep < own_due):
+        d_color, _ = _time_rag(earliest_dep)
+        if _WORSE[d_color] > _WORSE[color]:
+            days = (earliest_dep - date.today()).days
+            color = d_color
+            reason = (
+                f"{d_color} due to dependant overdue by {-days} day(s)"
+                if days < 0
+                else f"{d_color} due to dependant due in {days} day(s)"
+            )
+
     row["status"] = color
     row["health_reason"] = reason
     return row
@@ -106,7 +127,12 @@ def _validate_deliverable(body: dict) -> str | None:
 
 _SELECT_BASE = (
     "SELECT d.*, dep.title AS depends_on_title, dep.due_date AS depends_on_due_date, "
-    "dep_proj.title AS depends_on_project_title "
+    "dep_proj.title AS depends_on_project_title, "
+    "(SELECT MIN(due_date) FROM deliverables "
+    " WHERE depends_on_id = d.id AND is_deleted = FALSE) AS earliest_dependant_due, "
+    "(SELECT title FROM deliverables "
+    " WHERE depends_on_id = d.id AND is_deleted = FALSE AND due_date IS NOT NULL "
+    " ORDER BY due_date ASC LIMIT 1) AS earliest_dependant_title "
     "FROM deliverables d "
     "LEFT JOIN deliverables dep ON dep.id = d.depends_on_id "
     "LEFT JOIN projects dep_proj ON dep_proj.id = dep.project_id "

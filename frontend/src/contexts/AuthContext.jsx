@@ -76,6 +76,12 @@ export function AuthProvider({ children }) {
     [user],
   );
 
+  /** @returns {boolean} True if user can create/update projects, people, assignments, budgets. */
+  const canManage = useCallback(
+    () => ['admin', 'manager'].includes(user?.role),
+    [user],
+  );
+
   /** @returns {boolean} True if user is an administrator. */
   const isAdmin = useCallback(() => user?.role === 'admin', [user]);
 
@@ -88,6 +94,7 @@ export function AuthProvider({ children }) {
     logout,
     canEdit,
     canDelete,
+    canManage,
     isAdmin,
   };
 

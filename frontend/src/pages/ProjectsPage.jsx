@@ -188,7 +188,7 @@ function ProjectFormDialog({ open, project, allProjects, onSave, onClose, saving
         </Box>
         <TextField
           select
-          label="Dependencies"
+          label="Depends on"
           value={form.dependency_ids}
           onChange={(e) => setForm((f) => ({ ...f, dependency_ids: e.target.value }))}
           fullWidth
@@ -233,7 +233,7 @@ ProjectFormDialog.defaultProps = { project: null, saveError: '' };
 function ProjectsPage() {
   const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
-  const { canEdit, canDelete } = useAuth();
+  const { canEdit, canDelete, canManage } = useAuth();
   const [rows, setRows] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
@@ -396,7 +396,7 @@ function ProjectsPage() {
       sortable: false,
       renderCell: ({ row }) => (
         <Box onClick={(e) => e.stopPropagation()}>
-          {canEdit() && (
+          {canManage() && (
             <IconButton
               size="small"
               onClick={() => { setEditing(row); setFormOpen(true); }}
@@ -420,7 +420,7 @@ function ProjectsPage() {
         <Typography variant="h5" fontWeight="bold">
           Projects
         </Typography>
-        {canEdit() && (
+        {canManage() && (
           <Button
             variant="contained"
             startIcon={<AddIcon />}
@@ -481,6 +481,7 @@ function ProjectsPage() {
         pageSize={20}
         rowsPerPageOptions={[20, 50]}
         disableSelectionOnClick
+        initialState={{ sorting: { sortModel: [{ field: 'status', sort: 'asc' }] } }}
         onRowClick={({ row }) => navigate(`/projects/${row.id}`)}
         sx={{ bgcolor: 'background.paper', cursor: 'pointer' }}
       />

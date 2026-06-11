@@ -140,7 +140,7 @@ BudgetFormDialog.defaultProps = { item: null, projectId: null, saveError: '' };
  * Budgets page — per-project budget item tracking with planned vs consumed.
  */
 function BudgetsPage() {
-  const { canEdit, canDelete } = useAuth();
+  const { canEdit, canDelete, canManage } = useAuth();
   const { mode } = useColorMode();
   const isDark = mode === 'dark';
   const [rows, setRows] = useState([]);
@@ -267,7 +267,7 @@ function BudgetsPage() {
       field: 'actions', headerName: '', width: 90, sortable: false,
       renderCell: ({ row }) => (
         <Box onClick={(e) => e.stopPropagation()}>
-          {!row._readOnly && canEdit() && <IconButton size="small" onClick={() => { setEditing(row); setFormOpen(true); }}><EditIcon fontSize="small" /></IconButton>}
+          {!row._readOnly && canManage() && <IconButton size="small" onClick={() => { setEditing(row); setFormOpen(true); }}><EditIcon fontSize="small" /></IconButton>}
           {!row._readOnly && canDelete() && <IconButton size="small" color="error" onClick={() => setDeleteTarget(row)}><DeleteIcon fontSize="small" /></IconButton>}
         </Box>
       ),
@@ -278,7 +278,7 @@ function BudgetsPage() {
     <Box>
       <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 2 }}>
         <Typography variant="h5" fontWeight="bold">Budgets</Typography>
-        {canEdit() && selectedProject && (
+        {canManage() && selectedProject && (
           <Button variant="contained" startIcon={<AddIcon />} onClick={() => { setEditing(null); setFormOpen(true); }}>
             Add Budget Item
           </Button>

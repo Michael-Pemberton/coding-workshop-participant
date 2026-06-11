@@ -2,6 +2,7 @@
 
 import json
 import logging
+from datetime import date
 
 from shared import (
     get_db, resp, get_user, extract_id, rows_to_dicts, row_to_dict,
@@ -13,14 +14,79 @@ logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
 _VALID_PROJECT_STATUSES = VALID_STATUSES.get("projects", set())
+_WORSE = {"green": 0, "amber": 1, "red": 2}
+
+
+def _time_band(end) -> tuple[str, str]:
+    """Time-based RAG from a project end_date. Mirrors calculate_health's time bands."""
+    if not end:
+        return "green", ""
+    if isinstance(end, str):
+        try:
+            end = date.fromisoformat(end[:10])
+        except ValueError:
+            return "green", ""
+    days = (end - date.today()).days
+    if days < 0:
+        return "red", "overdue"
+    if days <= 1:
+        return "red", "1 day or less remaining"
+    if days <= 5:
+        return "amber", "5 days or less remaining"
+    return "green", ""
+
+
+def _propagate(color: str, reason: str, end_value, label: str) -> tuple[str, str]:
+    """If `end_value` is set and its time-band is worse than `color`, return the
+    worsened (color, reason) using "<color> due to <label> due in N day(s)"."""
+    if not end_value:
+        return color, reason
+    if isinstance(end_value, str):
+        try:
+            end_value = date.fromisoformat(end_value[:10])
+        except ValueError:
+            return color, reason
+    d_color, _ = _time_band(end_value)
+    if _WORSE[d_color] > _WORSE[color]:
+        days = (end_value - date.today()).days
+        new_reason = (
+            f"{d_color} due to {label} overdue by {-days} day(s)"
+            if days < 0
+            else f"{d_color} due to {label} due in {days} day(s)"
+        )
+        return d_color, new_reason
+    return color, reason
 
 
 def _with_health(row: dict) -> dict:
-    """Recomputes health + injects health_reason so display reflects current rules."""
+    """Recomputes health + injects health_reason. Appends a "; Depends on \"X\""
+    suffix for prerequisites, and worsens to match either a prerequisite or a
+    dependant whose end_date pushes a worse time-band."""
     color, reason = calculate_health(row)
+
+    dep_titles = row.get("dependency_titles") or []
+    if dep_titles:
+        joined = ", ".join(f'"{t}"' for t in dep_titles)
+        reason = f"{reason}; Depends on {joined}"
+
+    color, reason = _propagate(color, reason, row.get("earliest_prerequisite_end"), "prerequisite")
+    color, reason = _propagate(color, reason, row.get("earliest_dependant_end"), "dependant")
+
     row["health"] = color
     row["health_reason"] = reason
     return row
+
+
+_SELECT_BASE = (
+    "SELECT p.*, "
+    "(SELECT MIN(end_date) FROM projects d "
+    " WHERE p.id = ANY(d.dependency_ids) AND d.is_deleted = FALSE) AS earliest_dependant_end, "
+    "(SELECT MIN(end_date) FROM projects t "
+    " WHERE t.id = ANY(p.dependency_ids) AND t.is_deleted = FALSE) AS earliest_prerequisite_end, "
+    "(SELECT array_agg(title) FROM projects t "
+    " WHERE t.id = ANY(p.dependency_ids) AND t.is_deleted = FALSE) AS dependency_titles "
+    "FROM projects p "
+)
 
 
 def _validate_project(body: dict) -> str | None:
@@ -55,25 +121,25 @@ def list_projects(event: dict) -> dict:
     params = event.get("queryStringParameters") or {}
     conn = get_db()
     scope_ids = get_scoped_project_ids(conn, get_user(event))
-    conditions = ["is_deleted = FALSE"]
+    conditions = ["p.is_deleted = FALSE"]
     vals: list = []
     if scope_ids is not None:
         if not scope_ids:
             return resp(200, {"data": [], "success": True})
-        conditions.append("id = ANY(%s)")
+        conditions.append("p.id = ANY(%s)")
         vals.append(scope_ids)
     if params.get("status"):
         if params["status"] not in _VALID_PROJECT_STATUSES:
             return resp(400, {"error": f"status must be one of: {sorted(_VALID_PROJECT_STATUSES)}", "success": False})
-        conditions.append("status = %s")
+        conditions.append("p.status = %s")
         vals.append(params["status"])
     if params.get("health"):
         if params["health"] not in VALID_HEALTH:
             return resp(400, {"error": f"health must be one of: {sorted(VALID_HEALTH)}", "success": False})
-        conditions.append("health = %s")
+        conditions.append("p.health = %s")
         vals.append(params["health"])
     if params.get("search"):
-        conditions.append("LOWER(title) LIKE %s")
+        conditions.append("LOWER(p.title) LIKE %s")
         vals.append(f"%{params['search'].lower()}%")
     try:
         limit = min(int(params.get("limit", 100)), 500)
@@ -82,10 +148,15 @@ def list_projects(event: dict) -> dict:
         return resp(400, {"error": "limit and offset must be integers", "success": False})
     with conn.cursor() as cur:
         cur.execute(
-            f"SELECT * FROM projects WHERE {' AND '.join(conditions)} ORDER BY created_at DESC LIMIT %s OFFSET %s",
+            f"{_SELECT_BASE} WHERE {' AND '.join(conditions)} ORDER BY p.created_at DESC LIMIT %s OFFSET %s",
             vals + [limit, offset],
         )
-        return resp(200, {"data": [_with_health(r) for r in rows_to_dicts(cur)], "success": True})
+        items = [_with_health(r) for r in rows_to_dicts(cur)]
+        if params.get("health"):
+            # Re-filter after applying dependant propagation, since the stored
+            # `health` column may now differ from the computed value.
+            items = [i for i in items if i["health"] == params["health"]]
+        return resp(200, {"data": items, "success": True})
 
 
 def get_project(event: dict, project_id: str) -> dict:
@@ -95,7 +166,7 @@ def get_project(event: dict, project_id: str) -> dict:
     if scope_ids is not None and project_id not in scope_ids:
         return resp(404, {"error": "Project not found", "success": False})
     with conn.cursor() as cur:
-        cur.execute("SELECT * FROM projects WHERE id = %s AND is_deleted = FALSE", (project_id,))
+        cur.execute(f"{_SELECT_BASE} WHERE p.id = %s AND p.is_deleted = FALSE", (project_id,))
         row = cur.fetchone()
         if not row:
             return resp(404, {"error": "Project not found", "success": False})

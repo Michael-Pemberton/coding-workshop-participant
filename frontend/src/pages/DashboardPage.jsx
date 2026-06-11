@@ -15,6 +15,7 @@ import TableRow from '@mui/material/TableRow';
 import Paper from '@mui/material/Paper';
 
 import { projectsApi, peopleApi, assignmentsApi } from '../services/api.js';
+import { useAuth } from '../contexts/AuthContext.jsx';
 import HealthChip from '../components/HealthChip.jsx';
 import StatusChip from '../components/StatusChip.jsx';
 import LoadingOverlay from '../components/LoadingOverlay.jsx';
@@ -56,6 +57,7 @@ KpiCard.defaultProps = { color: undefined };
  */
 function DashboardPage() {
   const navigate = useNavigate();
+  const { user } = useAuth();
   const [projects, setProjects] = useState([]);
   const [people, setPeople] = useState([]);
   const [assignments, setAssignments] = useState([]);
@@ -87,15 +89,18 @@ function DashboardPage() {
   if (error) return <ErrorAlert message={error} onRetry={fetchData} />;
 
   const activeProjects = projects.filter((p) => p.status === 'active');
-  const atRisk = projects.filter((p) => p.health === 'red' || p.health === 'amber');
-  const greenCount = projects.filter((p) => p.health === 'green').length;
-  const amberCount = projects.filter((p) => p.health === 'amber').length;
-  const redCount = projects.filter((p) => p.health === 'red').length;
+  const activeProjectIds = new Set(activeProjects.map((p) => p.id));
+  const atRisk = activeProjects.filter((p) => p.health === 'red' || p.health === 'amber');
+  const greenCount = activeProjects.filter((p) => p.health === 'green').length;
+  const amberCount = activeProjects.filter((p) => p.health === 'amber').length;
+  const redCount = activeProjects.filter((p) => p.health === 'red').length;
 
-  // Calculate overallocated people (sum hours_per_week > weekly_hours_capacity)
+  // Calculate overallocated people (sum hours_per_week > weekly_hours_capacity).
+  // Only count assignments to active projects — hours on inactive projects don't
+  // consume current capacity.
   const allocationByPerson = {};
   assignments.forEach((a) => {
-    if (!a.is_deleted) {
+    if (!a.is_deleted && activeProjectIds.has(a.project_id)) {
       allocationByPerson[a.person_id] =
         (allocationByPerson[a.person_id] || 0) + (a.hours_per_week || 0);
     }
@@ -104,13 +109,20 @@ function DashboardPage() {
     (p) => (allocationByPerson[p.id] || 0) > (p.weekly_hours_capacity || 40),
   );
 
-  const overBudget = projects.filter(
+  const overBudget = activeProjects.filter(
     (p) => Number(p.budget_planned || 0) > 0
       && Number(p.budget_consumed || 0) > Number(p.budget_planned || 0),
   );
 
+  // Sort by per-user last-viewed timestamp; unseen projects fall back to created_at.
+  let lastViewed = {};
+  if (user?.id) {
+    try { lastViewed = JSON.parse(localStorage.getItem(`recentProjects:${user.id}`) || '{}'); }
+    catch { lastViewed = {}; }
+  }
+  const recentScore = (p) => lastViewed[p.id] ?? new Date(p.created_at).getTime() ?? 0;
   const recentProjects = [...projects]
-    .sort((a, b) => new Date(b.created_at) - new Date(a.created_at))
+    .sort((a, b) => recentScore(b) - recentScore(a))
     .slice(0, 5);
 
   return (

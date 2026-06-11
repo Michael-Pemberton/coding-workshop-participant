@@ -120,8 +120,14 @@ function PersonFormDialog({ open, person, projects, onSave, onClose, saving, sav
   const set = (field) => (ev) => setForm((f) => ({ ...f, [field]: ev.target.value }));
 
   const assignedIds = new Set(assignments.map((a) => a.project_id));
-  const availableProjects = projects.filter((p) => !assignedIds.has(p.id));
+  const activeProjects = projects.filter((p) => p.status === 'active');
+  const activeProjectIdSet = new Set(activeProjects.map((p) => p.id));
+  const availableProjects = activeProjects.filter((p) => !assignedIds.has(p.id));
   const projectTitle = (id) => projects.find((p) => p.id === id)?.title ?? id;
+  // Display only assignments to currently-active projects. Inactive assignments
+  // are kept in state so they're preserved on save and reappear if the project
+  // becomes active again.
+  const visibleAssignments = assignments.filter((a) => !a.project_id || activeProjectIdSet.has(a.project_id) || a._new);
 
   return (
     <Dialog open={open} onClose={onClose} maxWidth="sm" fullWidth>
@@ -161,10 +167,10 @@ function PersonFormDialog({ open, person, projects, onSave, onClose, saving, sav
           <Typography variant="caption" color="text.secondary">Project Assignments</Typography>
         </Divider>
 
-        {assignments.length === 0 && (
+        {visibleAssignments.length === 0 && (
           <Typography variant="body2" color="text.secondary">No projects assigned.</Typography>
         )}
-        {assignments.map((a) => {
+        {visibleAssignments.map((a) => {
           const key = a.id ?? a._tempId;
           return (
             <Box key={key} sx={{ display: 'flex', gap: 1, alignItems: 'center' }}>
@@ -288,9 +294,10 @@ async function syncAssignments(personId, initial, current) {
  * People list page with allocation tracking and CRUD operations.
  */
 function PeoplePage() {
-  const { canEdit, canDelete } = useAuth();
+  const { canEdit, canDelete, canManage } = useAuth();
   const [rows, setRows] = useState([]);
   const [projects, setProjects] = useState([]);
+  const [assignments, setAssignments] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [search, setSearch] = useState('');
@@ -323,7 +330,26 @@ function PeoplePage() {
     }
   }, []);
 
-  useEffect(() => { fetchPeople(); fetchProjects(); }, [fetchPeople, fetchProjects]);
+  const fetchAssignments = useCallback(async () => {
+    try {
+      const result = await assignmentsApi.getAll();
+      setAssignments(result?.data ?? result ?? []);
+    } catch {
+      setAssignments([]);
+    }
+  }, []);
+
+  useEffect(() => { fetchPeople(); fetchProjects(); fetchAssignments(); }, [fetchPeople, fetchProjects, fetchAssignments]);
+
+  // Recompute allocation per person, counting only assignments to active projects
+  // so hours on inactive projects don't appear in the capacity bar.
+  const activeProjectIds = new Set(projects.filter((p) => p.status === 'active').map((p) => p.id));
+  const activeHoursByPerson = {};
+  assignments.forEach((a) => {
+    if (!a.is_deleted && activeProjectIds.has(a.project_id)) {
+      activeHoursByPerson[a.person_id] = (activeHoursByPerson[a.person_id] || 0) + (a.hours_per_week || 0);
+    }
+  });
 
   const filtered = rows.filter((r) =>
     !search ||
@@ -348,6 +374,7 @@ function PeoplePage() {
       setFormOpen(false);
       setEditing(null);
       await fetchPeople();
+      await fetchAssignments();
     } catch (err) {
       setSaveError(err.message);
     } finally {
@@ -361,6 +388,7 @@ function PeoplePage() {
       await peopleApi.remove(deleteTarget.id);
       setDeleteTarget(null);
       await fetchPeople();
+      await fetchAssignments();
     } catch (err) {
       setError(err.message);
     } finally {
@@ -384,7 +412,7 @@ function PeoplePage() {
       headerName: 'Allocation',
       width: 180,
       renderCell: ({ row }) => {
-        const allocated = row.allocated_hours_per_week || 0;
+        const allocated = activeHoursByPerson[row.id] || 0;
         const capacity = row.weekly_hours_capacity || 40;
         const pct = Math.round((allocated / capacity) * 100);
         return (
@@ -420,7 +448,7 @@ function PeoplePage() {
       sortable: false,
       renderCell: ({ row }) => (
         <Box onClick={(e) => e.stopPropagation()}>
-          {canEdit() && (
+          {canManage() && (
             <IconButton size="small" onClick={() => { setEditing(row); setFormOpen(true); }}>
               <EditIcon fontSize="small" />
             </IconButton>
@@ -439,7 +467,7 @@ function PeoplePage() {
     <Box>
       <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 2 }}>
         <Typography variant="h5" fontWeight="bold">People</Typography>
-        {canEdit() && (
+        {canManage() && (
           <Button variant="contained" startIcon={<AddIcon />} onClick={() => { setEditing(null); setFormOpen(true); }}>
             New Person
           </Button>

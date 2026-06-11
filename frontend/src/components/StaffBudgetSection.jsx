@@ -74,7 +74,7 @@ MoneyEditCell.defaultProps = { value: null, overridden: false, disabled: false }
  * assignments × hourly_pay × project weeks; manager can override per row.
  */
 function StaffBudgetSection({ projectId, defaultExpanded, onChange }) {
-  const { canEdit } = useAuth();
+  const { canManage } = useAuth();
   const { mode } = useColorMode();
   const isDark = mode === 'dark';
   const [data, setData] = useState({ items: [], weeks: 0, total_planned: 0, total_consumed: 0 });
@@ -87,7 +87,8 @@ function StaffBudgetSection({ projectId, defaultExpanded, onChange }) {
     setError('');
     try {
       const result = await budgetsApi.getStaff(projectId);
-      setData(result?.data ?? result ?? { items: [], total_planned: 0, total_consumed: 0 });
+      const payload = result?.data ?? result ?? {};
+      setData({ weeks: 0, total_planned: 0, total_consumed: 0, ...payload, items: payload.items ?? [] });
     } catch (err) {
       setError(err.message);
     } finally {
@@ -150,7 +151,7 @@ function StaffBudgetSection({ projectId, defaultExpanded, onChange }) {
                 <TableCell align="right">Auto Planned</TableCell>
                 <TableCell align="right">Planned</TableCell>
                 <TableCell align="right">Consumed</TableCell>
-                {canEdit() && <TableCell />}
+                {canManage() && <TableCell />}
               </TableRow>
             </TableHead>
             <TableBody>
@@ -167,7 +168,7 @@ function StaffBudgetSection({ projectId, defaultExpanded, onChange }) {
                     <MoneyEditCell
                       value={item.planned_overridden ? item.amount_planned : null}
                       overridden={item.planned_overridden}
-                      disabled={!canEdit()}
+                      disabled={!canManage()}
                       onCommit={(v) => updateOverride(item, { amount_planned: v })}
                     />
                   </TableCell>
@@ -175,11 +176,11 @@ function StaffBudgetSection({ projectId, defaultExpanded, onChange }) {
                     <MoneyEditCell
                       value={item.consumed_overridden ? item.amount_consumed : null}
                       overridden={item.consumed_overridden}
-                      disabled={!canEdit()}
+                      disabled={!canManage()}
                       onCommit={(v) => updateOverride(item, { amount_consumed: v })}
                     />
                   </TableCell>
-                  {canEdit() && (
+                  {canManage() && (
                     <TableCell>
                       {(item.planned_overridden || item.consumed_overridden) && (
                         <Tooltip title="Reset to auto-derived">
@@ -196,7 +197,7 @@ function StaffBudgetSection({ projectId, defaultExpanded, onChange }) {
                 <TableCell colSpan={5}><strong>Total</strong></TableCell>
                 <TableCell align="right"><strong>{money(data.total_planned)}</strong></TableCell>
                 <TableCell align="right"><strong>{money(data.total_consumed)}</strong></TableCell>
-                {canEdit() && <TableCell />}
+                {canManage() && <TableCell />}
               </TableRow>
             </TableBody>
           </Table>

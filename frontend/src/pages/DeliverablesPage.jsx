@@ -147,7 +147,7 @@ function DeliverablesPage() {
   const { canEdit, canDelete } = useAuth();
   const [rows, setRows] = useState([]);
   const [projects, setProjects] = useState([]);
-  const [selectedProject, setSelectedProject] = useState(() => localStorage.getItem('deliverables:selectedProject') || '');
+  const [selectedProject, setSelectedProject] = useState(() => localStorage.getItem('deliverables:selectedProject') || '__all__');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [formOpen, setFormOpen] = useState(false);
@@ -171,9 +171,26 @@ function DeliverablesPage() {
     setLoading(true);
     setError('');
     try {
-      const result = await deliverablesApi.getAll({ project_id: selectedProject });
-      setRows(result?.data ?? result ?? []);
+      const params = selectedProject === '__all__' ? undefined : { project_id: selectedProject };
+      const result = await deliverablesApi.getAll(params);
+      const items = result?.data ?? result ?? [];
+      if (selectedProject === '__all__') {
+        // Sort by due date ascending; rows without a due date go to the bottom.
+        items.sort((a, b) => {
+          if (!a.due_date && !b.due_date) return 0;
+          if (!a.due_date) return 1;
+          if (!b.due_date) return -1;
+          return a.due_date.localeCompare(b.due_date);
+        });
+      }
+      setRows(items);
     } catch (err) {
+      if (selectedProject !== '__all__') {
+        // No access to the previously-selected project — fall back to All.
+        localStorage.setItem('deliverables:selectedProject', '__all__');
+        setSelectedProject('__all__');
+        return;
+      }
       setError(err.message);
     } finally {
       setLoading(false);
@@ -188,9 +205,13 @@ function DeliverablesPage() {
     setSaveError('');
     try {
       const payload = { ...form };
-      // Backend rejects "" for date/UUID fields — strip empties so they're treated as unset.
+      // Backend rejects "" for date/UUID fields. On create, strip empties so they're unset.
+      // On edit, send null to explicitly clear a previously-set value (e.g. removing a dependency).
       ['due_date', 'depends_on_id', 'description'].forEach((k) => {
-        if (payload[k] === '' || payload[k] == null) delete payload[k];
+        if (payload[k] === '' || payload[k] == null) {
+          if (editing) payload[k] = null;
+          else delete payload[k];
+        }
       });
       if (editing) await deliverablesApi.update(editing.id, payload);
       else { await deliverablesApi.create(payload); localStorage.removeItem(DRAFT_KEY_PREFIX + (selectedProject || 'none')); }
@@ -217,8 +238,12 @@ function DeliverablesPage() {
     }
   };
 
+  const isAll = selectedProject === '__all__';
+  const projectTitleById = Object.fromEntries(projects.map((p) => [p.id, p.title]));
+
   const columns = [
     { field: 'title', headerName: 'Title', flex: 1, minWidth: 160 },
+    ...(isAll ? [{ field: 'project_id', headerName: 'Project', flex: 1, minWidth: 140, valueGetter: (_, row) => row.project_title ?? projectTitleById[row.project_id] ?? '—' }] : []),
     { field: 'status', headerName: 'Status', width: 110, renderCell: ({ row }) => <HealthChip health={row.status} reason={row.health_reason} /> },
     { field: 'due_date', headerName: 'Due Date', width: 120, valueFormatter: (value) => value?.slice(0, 10) ?? '—' },
     { field: 'time_left', headerName: 'Time Left', width: 110, valueGetter: (_, row) => timeLeft(row.due_date) },
@@ -238,7 +263,7 @@ function DeliverablesPage() {
     <Box>
       <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 2 }}>
         <Typography variant="h5" fontWeight="bold">Deliverables</Typography>
-        {canEdit() && selectedProject && (
+        {canEdit() && selectedProject && !isAll && (
           <Button variant="contained" startIcon={<AddIcon />} onClick={() => { setEditing(null); setFormOpen(true); }}>
             Add Deliverable
           </Button>
@@ -255,6 +280,7 @@ function DeliverablesPage() {
           sx={{ minWidth: 280 }}
         >
           <MenuItem value="">Select a project…</MenuItem>
+          <MenuItem value="__all__">All deliverables</MenuItem>
           {projects.map((p) => <MenuItem key={p.id} value={p.id}>{p.title}</MenuItem>)}
         </TextField>
       </Box>
@@ -280,7 +306,7 @@ function DeliverablesPage() {
         open={formOpen}
         deliverable={editing}
         projects={projects}
-        projectId={selectedProject}
+        projectId={isAll ? (editing?.project_id || '') : selectedProject}
         onSave={handleSave}
         onClose={() => { setFormOpen(false); setEditing(null); setSaveError(''); }}
         saving={saving}

@@ -43,6 +43,7 @@ import ErrorAlert from '../components/ErrorAlert.jsx';
 import { timeLeft } from '../utils/dueDate.js';
 
 const BUDGET_CATEGORIES = ['external staff', 'internal staff', 'tooling', 'infrastructure', 'travel', 'other'];
+const PROJECT_STATUSES = ['active', 'inactive', 'completed', 'on_hold', 'cancelled'];
 
 const EMPTY_ASSIGN = { person_id: '', role_on_project: '', hours_per_week: '' };
 const EMPTY_DELIV = { title: '', description: '', due_date: '', depends_on_id: '' };
@@ -70,7 +71,7 @@ TabPanel.propTypes = {
 function ProjectDetailPage() {
   const { id } = useParams();
   const navigate = useNavigate();
-  const { canEdit, canDelete } = useAuth();
+  const { canEdit, canDelete, canManage, user } = useAuth();
   const [project, setProject] = useState(null);
   const [allProjects, setAllProjects] = useState([]);
   const [allPeople, setAllPeople] = useState([]);
@@ -126,6 +127,27 @@ function ProjectDetailPage() {
   }, [id]);
 
   useEffect(() => { fetchAll(); }, [fetchAll]);
+
+  // Record this project as recently viewed (scoped per user) so the dashboard
+  // can sort "Recent Projects" by last-viewed time.
+  useEffect(() => {
+    if (!id || !user?.id) return;
+    try {
+      const key = `recentProjects:${user.id}`;
+      const map = JSON.parse(localStorage.getItem(key) || '{}');
+      map[id] = Date.now();
+      localStorage.setItem(key, JSON.stringify(map));
+    } catch { /* localStorage unavailable */ }
+  }, [id, user?.id]);
+
+  const updateProjectField = async (patch) => {
+    try {
+      await projectsApi.update(id, patch);
+      await fetchAll();
+    } catch (err) {
+      setError(err.message);
+    }
+  };
 
   useEffect(() => {
     if (assignDialog && !assignEditing) localStorage.setItem(draftKey('assign', id), JSON.stringify(assignForm));
@@ -224,7 +246,10 @@ function ProjectDetailPage() {
     try {
       const payload = { ...delivForm, project_id: id };
       ['due_date', 'depends_on_id', 'description'].forEach((k) => {
-        if (payload[k] === '' || payload[k] == null) delete payload[k];
+        if (payload[k] === '' || payload[k] == null) {
+          if (delivEditing) payload[k] = null;
+          else delete payload[k];
+        }
       });
       if (delivEditing) await deliverablesApi.update(delivEditing.id, payload);
       else { await deliverablesApi.create(payload); localStorage.removeItem(draftKey('deliv', id)); }
@@ -333,9 +358,72 @@ function ProjectDetailPage() {
       <TabPanel value={tab} index={0}>
         <Paper sx={{ p: 3 }}>
           {project.description && <Typography sx={{ mb: 2 }}>{project.description}</Typography>}
+          <Box sx={{ display: 'flex', alignItems: 'center', gap: 2, flexWrap: 'wrap', mb: 2 }}>
+            <Box>
+              <Typography variant="caption" color="text.secondary">Status</Typography>
+              {canManage() ? (
+                <TextField
+                  select
+                  size="small"
+                  value={project.status || 'active'}
+                  onChange={(e) => updateProjectField({ status: e.target.value })}
+                  sx={{ display: 'block', minWidth: 140, mt: 0.5 }}
+                >
+                  {PROJECT_STATUSES.map((s) => (
+                    <MenuItem key={s} value={s} sx={{ textTransform: 'capitalize' }}>{s.replace('_', ' ')}</MenuItem>
+                  ))}
+                </TextField>
+              ) : (
+                <Box sx={{ mt: 0.5 }}><StatusChip status={project.status} /></Box>
+              )}
+            </Box>
+            <Box>
+              <Typography variant="caption" color="text.secondary">Health</Typography>
+              <Box sx={{ mt: 0.5 }}><HealthChip health={project.health} reason={project.health_reason} /></Box>
+            </Box>
+            <Box sx={{ flexGrow: 1 }} />
+            <Box>
+              <Typography variant="caption" color="text.secondary">Start Date</Typography>
+              {canManage() ? (
+                <TextField
+                  type="date"
+                  size="small"
+                  defaultValue={project.start_date?.slice(0, 10) ?? ''}
+                  onBlur={(e) => {
+                    const v = e.target.value;
+                    if ((v || null) !== (project.start_date?.slice(0, 10) || null)) {
+                      updateProjectField({ start_date: v || null });
+                    }
+                  }}
+                  InputLabelProps={{ shrink: true }}
+                  sx={{ display: 'block', mt: 0.5 }}
+                />
+              ) : (
+                <Typography>{project.start_date?.slice(0, 10) ?? '—'}</Typography>
+              )}
+            </Box>
+            <Box>
+              <Typography variant="caption" color="text.secondary">End Date</Typography>
+              {canManage() ? (
+                <TextField
+                  type="date"
+                  size="small"
+                  defaultValue={project.end_date?.slice(0, 10) ?? ''}
+                  onBlur={(e) => {
+                    const v = e.target.value;
+                    if ((v || null) !== (project.end_date?.slice(0, 10) || null)) {
+                      updateProjectField({ end_date: v || null });
+                    }
+                  }}
+                  InputLabelProps={{ shrink: true }}
+                  sx={{ display: 'block', mt: 0.5 }}
+                />
+              ) : (
+                <Typography>{project.end_date?.slice(0, 10) ?? '—'}</Typography>
+              )}
+            </Box>
+          </Box>
           <Box sx={{ display: 'flex', gap: 4, flexWrap: 'wrap', mb: 2 }}>
-            <Box><Typography variant="caption" color="text.secondary">Start Date</Typography><Typography>{project.start_date?.slice(0, 10) ?? '—'}</Typography></Box>
-            <Box><Typography variant="caption" color="text.secondary">End Date</Typography><Typography>{project.end_date?.slice(0, 10) ?? '—'}</Typography></Box>
             <Box><Typography variant="caption" color="text.secondary">Budget Planned</Typography><Typography>${Number(project.budget_planned || 0).toLocaleString()}</Typography></Box>
             <Box><Typography variant="caption" color="text.secondary">Budget Consumed</Typography><Typography>${Number(project.budget_consumed || 0).toLocaleString()}</Typography></Box>
           </Box>
@@ -348,7 +436,7 @@ function ProjectDetailPage() {
           </Box>
           {project.dependency_ids?.length > 0 && (
             <Box>
-              <Typography variant="caption" color="text.secondary">Dependencies</Typography>
+              <Typography variant="caption" color="text.secondary">Depends on</Typography>
               <Box sx={{ display: 'flex', gap: 1, flexWrap: 'wrap', mt: 0.5 }}>
                 {project.dependency_ids.map((depId) => (
                   <Chip key={depId} label={depId} size="small" onClick={() => navigate(`/projects/${depId}`)} />
@@ -361,13 +449,13 @@ function ProjectDetailPage() {
 
       {/* People / Assignments */}
       <TabPanel value={tab} index={1}>
-        {canEdit() && (
+        {canManage() && (
           <Button startIcon={<AddIcon />} variant="contained" sx={{ mb: 2 }} onClick={() => openAssignDialog(null)}>
             Assign Person
           </Button>
         )}
         <Table size="small" component={Paper}>
-          <TableHead><TableRow><TableCell>Name</TableCell><TableCell>Role</TableCell><TableCell>Hrs/Week</TableCell>{canEdit() && <TableCell />}</TableRow></TableHead>
+          <TableHead><TableRow><TableCell>Name</TableCell><TableCell>Role</TableCell><TableCell>Hrs/Week</TableCell>{canManage() && <TableCell />}</TableRow></TableHead>
           <TableBody>
             {assignments.map((a) => {
               const person = allPeople.find((p) => p.id === a.person_id);
@@ -376,7 +464,7 @@ function ProjectDetailPage() {
                   <TableCell>{person?.name ?? a.person_id}</TableCell>
                   <TableCell>{a.role_on_project ?? '—'}</TableCell>
                   <TableCell>{a.hours_per_week}</TableCell>
-                  {canEdit() && (
+                  {canManage() && (
                     <TableCell>
                       <IconButton size="small" onClick={() => openAssignDialog(a)}><EditIcon fontSize="small" /></IconButton>
                       {canDelete() && <IconButton size="small" color="error" onClick={() => setConfirmDelete({ type: 'assignment', item: a })}><DeleteIcon fontSize="small" /></IconButton>}
@@ -423,13 +511,13 @@ function ProjectDetailPage() {
         <Box sx={{ mb: 2 }}>
           <StaffBudgetSection projectId={id} defaultExpanded onChange={fetchAll} />
         </Box>
-        {canEdit() && (
+        {canManage() && (
           <Button startIcon={<AddIcon />} variant="contained" sx={{ mb: 2 }} onClick={() => openBudgetDialog(null)}>
             Add Budget Item
           </Button>
         )}
         <Table size="small" component={Paper}>
-          <TableHead><TableRow><TableCell>Category</TableCell><TableCell>Description</TableCell><TableCell align="right">Planned</TableCell><TableCell align="right">Consumed</TableCell>{canEdit() && <TableCell />}</TableRow></TableHead>
+          <TableHead><TableRow><TableCell>Category</TableCell><TableCell>Description</TableCell><TableCell align="right">Planned</TableCell><TableCell align="right">Consumed</TableCell>{canManage() && <TableCell />}</TableRow></TableHead>
           <TableBody>
             {displayBudgets.map((b) => (
               <TableRow key={b.id}>
@@ -437,7 +525,7 @@ function ProjectDetailPage() {
                 <TableCell>{b.description ?? '—'}</TableCell>
                 <TableCell align="right">${Number(b.amount_planned || 0).toLocaleString()}</TableCell>
                 <TableCell align="right">${Number(b.amount_consumed || 0).toLocaleString()}</TableCell>
-                {canEdit() && (
+                {canManage() && (
                   <TableCell>
                     {!b._readOnly && (
                       <>
@@ -453,7 +541,7 @@ function ProjectDetailPage() {
               <TableCell colSpan={2}><strong>Total</strong></TableCell>
               <TableCell align="right"><strong>${totalBudgetPlanned.toLocaleString()}</strong></TableCell>
               <TableCell align="right"><strong>${totalBudgetConsumed.toLocaleString()}</strong></TableCell>
-              {canEdit() && <TableCell />}
+              {canManage() && <TableCell />}
             </TableRow>
             {(Math.abs(unallocatedPlanned) > 0.005 || Math.abs(unallocatedConsumed) > 0.005) && (
               <TableRow>
@@ -466,7 +554,7 @@ function ProjectDetailPage() {
                 <TableCell align="right" sx={{ color: unallocatedConsumed < 0 ? 'error.main' : 'text.secondary' }}>
                   ${unallocatedConsumed.toLocaleString()}
                 </TableCell>
-                {canEdit() && <TableCell />}
+                {canManage() && <TableCell />}
               </TableRow>
             )}
           </TableBody>
